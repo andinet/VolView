@@ -82,6 +82,29 @@ const doMedianFilter = async () => {
   }
 };
 
+// --- VISTA3D analysis --- //
+
+const vista3dLoading = ref(false);
+
+const testVista3d = async () => {
+  const id = currentImageID.value;
+  if (!id) return;
+
+  vista3dLoading.value = true;
+  try {
+    const result = await client.call('vista3d_analysis', [id, {
+      segmentEverything: true,
+      selectedLabels: [],
+      confidenceThreshold: 0.5,
+      usePointPrompts: false,
+      pointPrompts: [],
+    }]);
+    console.log('VISTA3D Result:', result);
+  } finally {
+    vista3dLoading.value = false;
+  }
+};
+
 const hasCurrentImage = computed(() => !!currentImageID.value);
 </script>
 
@@ -177,6 +200,33 @@ const hasCurrentImage = computed(() => !!currentImageID.value);
           <span v-if="!hasCurrentImage" class="ml-4 body-2">
             No image loaded
           </span>
+        </v-col>
+      </v-row>
+    </div>
+    <v-divider />
+    <v-list-subheader>VISTA3D Analysis</v-list-subheader>
+    <div>
+      <v-row>
+        <v-col>
+          <v-btn
+            @click="testVista3d"
+            :loading="vista3dLoading"
+            :disabled="!ready || !hasCurrentImage"
+            color="primary"
+            prepend-icon="mdi-brain"
+          >
+            Test VISTA3D
+          </v-btn>
+          <span v-if="!hasCurrentImage" class="ml-4 body-2">
+            No image loaded
+          </span>
+        </v-col>
+      </v-row>
+      <v-row>
+        <v-col>
+          <div class="text-body-2 text-medium-emphasis">
+            Test VISTA3D segmentation analysis. Check the Analysis panel for full functionality.
+          </div>
         </v-col>
       </v-row>
     </div>

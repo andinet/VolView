@@ -46,6 +46,7 @@ import { ConnectionState, useServerStore } from '@/src/store/server';
 import DataBrowser from './DataBrowser.vue';
 import RenderingModule from './RenderingModule.vue';
 import AnnotationsModule from './AnnotationsModule.vue';
+import AnalysisModule from './AnalysisModule.vue';
 import ServerModule from './ServerModule.vue';
 import ProbeView from './ProbeView.vue';
 import { useToolStore } from '../store/tools';
@@ -68,6 +69,11 @@ const Modules: Module[] = [
     name: 'Annotations',
     icon: 'pencil',
     component: AnnotationsModule,
+  },
+  {
+    name: 'Analysis',
+    icon: 'brain',
+    component: AnalysisModule,
   },
   {
     name: 'Rendering',
