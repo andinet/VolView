@@ -28,15 +28,26 @@ async function gunzipUint8Array(dataU8: Uint8Array): Promise<Uint8Array> {
 }
 
 function typedArrayCtor(dtype: string): any {
-  return ({
-    Uint8Array, Int8Array, Uint16Array, Int16Array,
-    Uint32Array, Int32Array, Float32Array, Float64Array
-  }[dtype]) || Uint8Array;
+  // Handle both VTK.js format (Int16Array) and old format (int16)
+  const typeMap: Record<string, any> = {
+    'Uint8Array': Uint8Array, 'uint8': Uint8Array,
+    'Int8Array': Int8Array, 'int8': Int8Array,
+    'Uint16Array': Uint16Array, 'uint16': Uint16Array,
+    'Int16Array': Int16Array, 'int16': Int16Array,
+    'Uint32Array': Uint32Array, 'uint32': Uint32Array,
+    'Int32Array': Int32Array, 'int32': Int32Array,
+    'Float32Array': Float32Array, 'float32': Float32Array,
+    'Float64Array': Float64Array, 'float64': Float64Array,
+  };
+  const Ctor = typeMap[dtype];
+  if (!Ctor) throw new Error(`Unsupported vtk.js dtype: ${dtype}`);
+  return Ctor;
 }
 
 async function decodeArrayFieldInPlace(arrObj: any): Promise<void> {
   const isGz = arrObj.valuesCompression === 'gzip';
-  const isB64 = arrObj.valuesEncoding === 'base64';
+  const isB64 = arrObj.valuesEncoding === 'base64' || typeof arrObj.values === 'string';
+  
   if (!isB64 || typeof arrObj.values !== 'string') return;
 
   // base64 -> bytes
@@ -45,11 +56,20 @@ async function decodeArrayFieldInPlace(arrObj: any): Promise<void> {
   // gunzip if needed
   if (isGz) bytes = await gunzipUint8Array(bytes);
 
-  const Ctor = typedArrayCtor(arrObj.dtype);
+  // Determine the typed array constructor
+  const dtype = arrObj.dataType || arrObj.dtype || 'Uint8Array';
+  const Ctor = typedArrayCtor(dtype);
+  
+  // Sanity check: ensure buffer length is divisible by element size
+  const n = bytes.byteLength / Ctor.BYTES_PER_ELEMENT;
+  if (!Number.isInteger(n)) {
+    throw new Error(
+      `Decoded buffer length (${bytes.byteLength}) is not divisible by ${Ctor.BYTES_PER_ELEMENT} for ${dtype}`
+    );
+  }
+  
   // eslint-disable-next-line no-param-reassign
-  arrObj.values = new Ctor(
-    bytes.buffer, bytes.byteOffset, bytes.byteLength / Ctor.BYTES_PER_ELEMENT
-  );
+  arrObj.values = new Ctor(bytes.buffer, bytes.byteOffset, n);
 
   // eslint-disable-next-line no-param-reassign
   delete arrObj.valuesEncoding;
@@ -63,7 +83,14 @@ async function decodeVtkJsInPlace(ds: any): Promise<any> {
   const fixArrayList = (section: string) => {
     const arrays = ds?.[section]?.arrays;
     if (Array.isArray(arrays)) {
-      arrays.forEach((a: any) => tasks.push(decodeArrayFieldInPlace(a)));
+      arrays.forEach((a: any) => {
+        // Handle both direct array and array with 'data' wrapper
+        if (a.data) {
+          tasks.push(decodeArrayFieldInPlace(a.data));
+        } else {
+          tasks.push(decodeArrayFieldInPlace(a));
+        }
+      });
     }
   };
 
@@ -90,16 +117,47 @@ function createLabelmapWithData(imageId: string, segmentationData: Uint8Array, s
   // Create labelmap from source image structure
   const labelmap = createLabelmapFromImage(sourceImage);
   
+  const [dx, dy, dz] = shape;
+  const expected = dx * dy * dz;
+  
   // Replace the empty data with real segmentation data
   const scalars = vtkDataArray.newInstance({
+    name: 'Labels',
     numberOfComponents: 1,
     values: segmentationData,
   });
   
   labelmap.getPointData().setScalars(scalars);
-  labelmap.setDimensions(shape);
-  labelmap.computeTransforms();
   
+  const se = sourceImage.getExtent();
+  const sx = se[1] - se[0] + 1;
+  const sy = se[3] - se[2] + 1;
+  const sz = se[5] - se[4] + 1;
+  const sourceVox = sx * sy * sz;
+  
+  if (segmentationData.length !== expected) {
+    console.warn(`Labelmap voxel count mismatch: got ${segmentationData.length}, expected ${expected}`);
+  }
+  
+  // Log both voxel counts and computed shapes for debugging
+  console.log(`🔍 Seg bytes=${segmentationData.length}, shape=${dx}×${dy}×${dz}, source=${sx}×${sy}×${sz}`);
+  
+  // If voxel counts match, mirror the source; otherwise use shape-derived extent.
+  if (expected === sourceVox) {
+    labelmap.setExtent(se[0], se[1], se[2], se[3], se[4], se[5]);
+  } else {
+    labelmap.setExtent(0, dx - 1, 0, dy - 1, 0, dz - 1);
+  }
+  
+  labelmap.setSpacing(sourceImage.getSpacing());
+  labelmap.setOrigin(sourceImage.getOrigin());
+  
+  // Set direction if available (for proper orientation)
+  if (labelmap.setDirection && sourceImage.getDirection) {
+    labelmap.setDirection(sourceImage.getDirection());
+  }
+  
+  labelmap.modified();
   return labelmap;
 }
 
@@ -122,7 +180,7 @@ export interface Vista3dResult {
     volume: number;
   }>;
   processingTime: number;
-  labelmapData?: string; // Base64 encoded labelmap data from server
+  labelmapData?: string | Record<string, any>; // Can be JSON string or object
 }
 
 // Real VISTA3D server call function
@@ -211,7 +269,7 @@ async function createVista3dSegmentGroup(
   groupName: string, 
   labels: Array<{ id: number; name: string; confidence: number; volume: number }>,
   imageId: string,
-  labelmapData?: string
+  labelmapData?: string | Record<string, any>
 ) {
   console.log('🎨 Creating VISTA3D segment group...');
   
@@ -244,20 +302,35 @@ async function createVista3dSegmentGroup(
           console.log('🔄 Processing VTK.js format with proper decoding...');
           await decodeVtkJsInPlace(labelmapInfo);
           
-          if (labelmapInfo.pointData && labelmapInfo.pointData.arrays && labelmapInfo.pointData.arrays.length > 0) {
-            const arrayData = labelmapInfo.pointData.arrays[0];
-            segmentationArray = new Uint8Array(arrayData.values);
-            
-            // Calculate shape from extent
-            const extent = labelmapInfo.extent;
-            shape = [
-              extent[1] - extent[0] + 1,
-              extent[3] - extent[2] + 1,
-              extent[5] - extent[4] + 1
-            ];
-          } else {
-            throw new Error('Invalid VTK.js format: missing point data');
+          const arr0 = labelmapInfo.pointData?.arrays?.[0];
+          if (!arr0) throw new Error('Invalid VTK.js format: missing point data');
+          
+          // Unify: prefer 'data' wrapper if present
+          const container = (arr0?.data ?? arr0) as any;
+          const valuesTA = container?.values;
+          
+          // Debug: log decoded array info
+          console.log('🔍 Decoded array info:', {
+            dtype: container?.dataType,
+            ncomp: container?.numberOfComponents,
+            size: container?.size,
+            isUint8: valuesTA instanceof Uint8Array,
+            valuesLen: valuesTA?.length,
+            extent: labelmapInfo.extent
+          });
+          
+          if (!(valuesTA instanceof Uint8Array)) {
+            throw new Error(`Segment array must be Uint8Array, got ${valuesTA?.constructor?.name}`);
           }
+          segmentationArray = valuesTA;
+          
+          // Calculate shape from extent
+          const extent = labelmapInfo.extent;
+          shape = [
+            extent[1] - extent[0] + 1,
+            extent[3] - extent[2] + 1,
+            extent[5] - extent[4] + 1
+          ];
         }
       } else {
         // 🚀 NEW: Direct VTK.js format object with proper decoding
@@ -266,20 +339,35 @@ async function createVista3dSegmentGroup(
         
         await decodeVtkJsInPlace(vtkjsObj);
         
-        if (vtkjsObj.pointData && vtkjsObj.pointData.arrays && vtkjsObj.pointData.arrays.length > 0) {
-          const arrayData = vtkjsObj.pointData.arrays[0];
-          segmentationArray = new Uint8Array(arrayData.values);
-          
-          // Calculate shape from extent
-          const extent = vtkjsObj.extent;
-          shape = [
-            extent[1] - extent[0] + 1,
-            extent[3] - extent[2] + 1,
-            extent[5] - extent[4] + 1
-          ];
-        } else {
-          throw new Error('Invalid VTK.js format: missing point data');
+        const arr0 = vtkjsObj.pointData?.arrays?.[0];
+        if (!arr0) throw new Error('Invalid VTK.js format: missing point data');
+        
+        // Unify: prefer 'data' wrapper if present
+        const container = (arr0?.data ?? arr0) as any;
+        const valuesTA = container?.values;
+        
+        // Debug: log decoded array info
+        console.log('🔍 Decoded array info:', {
+          dtype: container?.dataType,
+          ncomp: container?.numberOfComponents,
+          size: container?.size,
+          isUint8: valuesTA instanceof Uint8Array,
+          valuesLen: valuesTA?.length,
+          extent: vtkjsObj.extent
+        });
+        
+        if (!(valuesTA instanceof Uint8Array)) {
+          throw new Error(`Segment array must be Uint8Array, got ${valuesTA?.constructor?.name}`);
         }
+        segmentationArray = valuesTA;
+        
+        // Calculate shape from extent
+        const extent = vtkjsObj.extent;
+        shape = [
+          extent[1] - extent[0] + 1,
+          extent[3] - extent[2] + 1,
+          extent[5] - extent[4] + 1
+        ];
       }
       
       // Create VTK labelmap with real segmentation data
@@ -363,10 +451,13 @@ async function createVista3dSegmentGroup(
   
   // Note: Using actual VISTA3D label IDs as segment values
   
+  // Note: Using actual VISTA3D label IDs as segment values (liver remapped from 1→101 to avoid VolView default segment conflict)
+  
   importantStructures.forEach((label) => {
     const color = getSegmentColor(label.name);
-    // 🔧 FIX: Use the actual label ID from VISTA3D model (matches voxel values)
-    const segmentValue = label.id; // This matches the voxel values in the labelmap
+    // 🔧 FIX: Handle VolView's default segment value=1 conflict
+    // VolView creates default segment with value=1, so reassign liver to avoid conflict
+    const segmentValue = label.id === 1 ? 101 : label.id; // Liver: 1 → 101, others keep original IDs
     
     try {
       segmentGroupStore.addSegment(segmentGroupId, {
@@ -385,6 +476,80 @@ async function createVista3dSegmentGroup(
   
   console.log(`🎯 Created segment group "${groupName}" with ID: ${segmentGroupId}`);
   console.log(`📊 Total segments: ${importantStructures.length}`);
+  
+  // 🔍 DEBUG: Comprehensive segment overlay validation
+  console.log('🔍 [VISTA3D DEBUG] Validating segment overlay alignment...');
+  
+  try {
+    const imageStore = useImageCacheStore();
+    const parentImage = imageStore.imageById[imageId]?.getVtkImageData();
+    const segmentGroup = segmentGroupStore.dataIndex[segmentGroupId];
+    
+    if (parentImage && segmentGroup) {
+      // Check coordinate alignment
+      const imageBounds = parentImage.getBounds();
+      const segmentBounds = segmentGroup.getBounds();
+      const imageSpacing = parentImage.getSpacing();
+      const segmentSpacing = segmentGroup.getSpacing();
+      const imageOrigin = parentImage.getOrigin();
+      const segmentOrigin = segmentGroup.getOrigin();
+      
+      console.log(`   📐 Image bounds: [${imageBounds.map((b: number) => b.toFixed(2)).join(', ')}]`);
+      console.log(`   📐 Segment bounds: [${segmentBounds.map((b: number) => b.toFixed(2)).join(', ')}]`);
+      console.log(`   📏 Image spacing: [${imageSpacing.map((s: number) => s.toFixed(3)).join(', ')}]`);
+      console.log(`   📏 Segment spacing: [${segmentSpacing.map((s: number) => s.toFixed(3)).join(', ')}]`);
+      console.log(`   📍 Image origin: [${imageOrigin.join(', ')}]`);
+      console.log(`   📍 Segment origin: [${segmentOrigin.join(', ')}]`);
+      
+      if (parentImage.getDirection && segmentGroup.getDirection) {
+        console.log(`   🧭 Image direction: ${parentImage.getDirection()}`);
+        console.log(`   🧭 Segment direction: ${segmentGroup.getDirection()}`);
+      }
+      
+      // Check alignment
+      const boundsMatch = imageBounds.every((val: number, i: number) => Math.abs(val - segmentBounds[i]) < 0.1);
+      const spacingMatch = imageSpacing.every((val: number, i: number) => Math.abs(val - segmentSpacing[i]) < 0.001);
+      const originMatch = imageOrigin.every((val: number, i: number) => Math.abs(val - segmentOrigin[i]) < 0.1);
+      
+      console.log(`   ✅ Coordinate alignment: bounds=${boundsMatch}, spacing=${spacingMatch}, origin=${originMatch}`);
+      
+      // Check actual voxel data for each created segment
+      const scalars = segmentGroup.getPointData().getScalars();
+      if (scalars) {
+        console.log(`   🎯 Checking voxel data for ${importantStructures.length} segments:`);
+        importantStructures.forEach((label) => {
+          const segmentValue = label.id === 1 ? 101 : label.id;
+          let voxelCount = 0;
+          const totalVoxels = scalars.getNumberOfTuples();
+          
+          for (let i = 0; i < totalVoxels; i++) {
+            if (scalars.getTuple(i)[0] === segmentValue) {
+              voxelCount++;
+            }
+          }
+          
+          const percentage = (voxelCount / totalVoxels * 100).toFixed(2);
+          console.log(`     ${label.name} (value=${segmentValue}): ${voxelCount}/${totalVoxels} voxels (${percentage}%)`);
+          
+          if (voxelCount === 0) {
+            console.warn(`     ⚠️ WARNING: ${label.name} has NO voxel data in labelmap!`);
+          }
+        });
+      } else {
+        console.warn(`   ⚠️ NO SCALARS: Segment group missing voxel data entirely!`);
+      }
+      
+      if (!boundsMatch || !spacingMatch) {
+        console.warn(`   🚨 CRITICAL: Coordinate system mismatch detected - segments may not display correctly!`);
+      } else {
+        console.log(`   ✅ SUCCESS: All coordinates properly aligned for correct overlay`);
+      }
+    } else {
+      console.warn(`   ⚠️ Missing data for validation: parentImage=${!!parentImage}, segmentGroup=${!!segmentGroup}`);
+    }
+  } catch (debugError) {
+    console.warn(`   ⚠️ Debug validation failed:`, debugError);
+  }
   
   return {
     segmentGroupId,

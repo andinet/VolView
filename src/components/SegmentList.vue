@@ -6,6 +6,7 @@ import {
   useSegmentGroupStore,
   makeDefaultSegmentName,
 } from '@/src/store/segmentGroups';
+import { useImageCacheStore } from '@/src/store/image-cache';
 import { Maybe } from '@/src/types';
 import { hexaToRGBA, rgbaToHexa } from '@/src/utils/color';
 import { reactive, ref, toRefs, computed, watch } from 'vue';
@@ -62,9 +63,95 @@ watch(
 const toggleVisible = (value: number) => {
   const segment = segmentGroupStore.getSegment(groupId.value, value);
   if (!segment) return;
+  
+  // 🔍 DEBUG: Check segment overlay alignment before toggling
+  console.log(`🔍 [SEGMENT DEBUG] Toggling visibility for segment "${segment.name}" (value=${value})`);
+  console.log(`   Current visibility: ${segment.visible} → ${!segment.visible}`);
+  
+  // Get parent image and segment group data for alignment check
+  const metadata = segmentGroupStore.metadataByID[groupId.value];
+  const parentImageId = metadata?.parentImage;
+  
+  if (parentImageId) {
+    const imageCacheStore = useImageCacheStore();
+    const parentImage = imageCacheStore.imageById[parentImageId]?.getVtkImageData();
+    const segmentGroup = segmentGroupStore.dataIndex[groupId.value];
+    
+    if (parentImage && segmentGroup) {
+      // Check coordinate system alignment
+      const imageBounds = parentImage.getBounds();
+      const segmentBounds = segmentGroup.getBounds();
+      const imageSpacing = parentImage.getSpacing();
+      const segmentSpacing = segmentGroup.getSpacing();
+      const imageOrigin = parentImage.getOrigin();
+      const segmentOrigin = segmentGroup.getOrigin();
+      const imageDims = parentImage.getDimensions();
+      const segmentDims = segmentGroup.getDimensions();
+      
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      console.log(`   📐 Image bounds: [${imageBounds.map((b: any) => b.toFixed(2)).join(', ')}]`);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      console.log(`   📐 Segment bounds: [${segmentBounds.map((b: any) => b.toFixed(2)).join(', ')}]`);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      console.log(`   📏 Image spacing: [${imageSpacing.map((s: any) => s.toFixed(3)).join(', ')}]`);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      console.log(`   📏 Segment spacing: [${segmentSpacing.map((s: any) => s.toFixed(3)).join(', ')}]`);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      console.log(`   📍 Image origin: [${imageOrigin.map((o: any) => o.toFixed(2)).join(', ')}]`);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      console.log(`   📍 Segment origin: [${segmentOrigin.map((o: any) => o.toFixed(2)).join(', ')}]`);
+      console.log(`   📦 Image dimensions: [${imageDims.join(', ')}]`);
+      console.log(`   📦 Segment dimensions: [${segmentDims.join(', ')}]`);
+      
+      // Check if coordinates align (within tolerance)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const boundsMatch = imageBounds.every((val: any, i: any) => Math.abs(val - segmentBounds[i]) < 0.1);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const spacingMatch = imageSpacing.every((val: any, i: any) => Math.abs(val - segmentSpacing[i]) < 0.001);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const originMatch = imageOrigin.every((val: any, i: any) => Math.abs(val - segmentOrigin[i]) < 0.1);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dimsMatch = imageDims.every((val: any, i: any) => val === segmentDims[i]);
+      
+      console.log(`   ✅ Bounds aligned: ${boundsMatch}`);
+      console.log(`   ✅ Spacing aligned: ${spacingMatch}`);  
+      console.log(`   ✅ Origin aligned: ${originMatch}`);
+      console.log(`   ✅ Dimensions match: ${dimsMatch}`);
+      
+      if (!boundsMatch || !spacingMatch || !originMatch) {
+        console.warn(`   ⚠️ ALIGNMENT ISSUE: Segment may not overlay correctly on image!`);
+      }
+      
+      // Check if segment has actual voxel data for this value
+      const scalars = segmentGroup.getPointData().getScalars();
+      if (scalars) {
+        let voxelCount = 0;
+        const totalVoxels = scalars.getNumberOfTuples();
+        for (let i = 0; i < totalVoxels; i++) {
+          if (scalars.getTuple(i)[0] === value) {
+            voxelCount++;
+          }
+        }
+        console.log(`   🎯 Voxel count for value ${value}: ${voxelCount}/${totalVoxels} (${(voxelCount/totalVoxels*100).toFixed(2)}%)`);
+        
+        if (voxelCount === 0) {
+          console.warn(`   ⚠️ NO VOXEL DATA: No voxels found with value ${value} in labelmap!`);
+        }
+      } else {
+        console.warn(`   ⚠️ NO SCALARS: Segment group has no scalar data!`);
+      }
+    } else {
+      console.warn(`   ⚠️ Missing data: parentImage=${!!parentImage}, segmentGroup=${!!segmentGroup}`);
+    }
+  } else {
+    console.warn(`   ⚠️ No parent image ID found for segment group`);
+  }
+  
   segmentGroupStore.updateSegment(groupId.value, value, {
     visible: !segment.visible,
   });
+  
+  console.log(`   ✅ Visibility toggled successfully`);
 };
 
 const allVisible = computed(() => {

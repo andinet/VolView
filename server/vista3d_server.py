@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import logging
 from datetime import datetime
+import base64
 import itk
 
 # Import VolView server transformation functions
@@ -24,6 +25,165 @@ try:
 except ImportError as e:
     print(f"⚠️ VolView transformers not available: {e}")
     VOLVIEW_TRANSFORMERS_AVAILABLE = False
+
+# ---- VTK.js Binary Serialization Helpers ----
+VTKJS_TO_NUMPY = {
+    "Int8Array":   np.int8,
+    "Uint8Array":  np.uint8,
+    "Int16Array":  np.int16,
+    "Uint16Array": np.uint16,
+    "Int32Array":  np.int32,
+    "Uint32Array": np.uint32,
+    "Float32Array": np.float32,
+    "Float64Array": np.float64,
+}
+
+# Map numpy types (not dtype objects) to VTK.js names
+NUMPY_TO_VTKJS = {
+    np.int8:    "Int8Array",
+    np.uint8:   "Uint8Array",
+    np.int16:   "Int16Array",
+    np.uint16:  "Uint16Array",
+    np.int32:   "Int32Array",
+    np.uint32:  "Uint32Array",
+    np.float32: "Float32Array",
+    np.float64: "Float64Array",
+}
+
+def _numpy_type(dt):
+    """Return the numpy *type* object (np.uint8, np.int16, ...) for any dtype-like."""
+    return np.dtype(dt).type
+
+def numpy_to_vtkjs_array(arr: np.ndarray, name="Scalars", ncomp: Optional[int] = None):
+    """
+    Convert a NumPy array to a VTK.js JSON-able vtkDataArray dict with base64 'values'.
+    For segmentation labels stored as floats, convert to appropriate integer type.
+    """
+    # Get numpy type from array dtype (NUMPY_TO_VTKJS uses type objects as keys, not dtype objects)
+    dtype_type = arr.dtype.type
+    
+    # Special handling for float arrays that contain integer labels (segmentation masks)
+    if dtype_type in [np.float32, np.float64]:
+        # Check if all values are integers
+        if np.all(np.mod(arr, 1) == 0):
+            # Convert to smallest appropriate unsigned integer type
+            max_val = arr.max()
+            if max_val <= 255:
+                arr = arr.astype(np.uint8)
+                dtype_type = np.uint8
+            elif max_val <= 65535:
+                arr = arr.astype(np.uint16)
+                dtype_type = np.uint16
+            else:
+                arr = arr.astype(np.uint32)
+                dtype_type = np.uint32
+            print(f"🔄 Converted float segmentation labels to {dtype_type.__name__} (max value: {max_val})")
+    
+    if dtype_type not in NUMPY_TO_VTKJS:
+        raise TypeError(f"Unsupported dtype {dtype_type}")
+
+    dataType = NUMPY_TO_VTKJS[dtype_type]
+    ncomp = ncomp or (arr.shape[-1] if arr.ndim > 1 else 1)
+    size = int(arr.size)
+
+    raw = arr.tobytes(order="C")
+    b64 = base64.b64encode(raw).decode("ascii")
+
+    return {
+        "vtkClass": "vtkDataArray",
+        "name": name,
+        "numberOfComponents": int(ncomp),
+        "size": size,
+        "dataType": dataType,
+        "littleEndian": (sys.byteorder == "little"),
+        "values": b64,
+    }
+
+def bytes_to_vtkjs_array(buf: bytes, dtype, name="Scalars", ncomp=1, size=None):
+    """
+    If you already have a bytes-like buffer, wrap it the same way.
+    """
+    dtype_type = _numpy_type(dtype)  # Normalize to type object
+    if dtype_type not in NUMPY_TO_VTKJS:
+        raise TypeError(f"Unsupported dtype {dtype_type}")
+    if size is None:
+        size = len(buf) // np.dtype(dtype_type).itemsize
+    b64 = base64.b64encode(bytes(buf)).decode("ascii")
+    return {
+        "vtkClass": "vtkDataArray",
+        "name": name,
+        "numberOfComponents": int(ncomp),
+        "size": int(size),
+        "dataType": NUMPY_TO_VTKJS[dtype_type],
+        "littleEndian": (sys.byteorder == "little"),
+        "values": b64,
+    }
+
+def ensure_vtkjs_values(field_dict):
+    """
+    Ensure the 'values' field in a VTK.js array dict is properly base64-encoded.
+    Handles both numpy arrays and bytes objects.
+    """
+    vals = field_dict.get("values")
+    if isinstance(vals, np.ndarray):
+        field_dict.update(numpy_to_vtkjs_array(vals, name=field_dict.get("name", "Scalars")))
+    elif isinstance(vals, (bytes, bytearray, memoryview)):
+        # Extract dtype from dataType field
+        data_type = field_dict.get("dataType", "Uint8Array")
+        dtype_type = VTKJS_TO_NUMPY.get(data_type, np.uint8)
+        ncomp = field_dict.get("numberOfComponents", 1)
+        size = field_dict.get("size")
+        field_dict.update(
+            bytes_to_vtkjs_array(vals, dtype=dtype_type, name=field_dict.get("name", "Scalars"), ncomp=ncomp, size=size)
+        )
+    # else: already JSON (e.g., a base64 string) – leave as is
+    return field_dict
+
+def fix_vtkjs_binary_data(obj):
+    """
+    Recursively fix any bytes objects in a VTK.js structure to be base64-encoded strings.
+    Handles all VTK.js structures including geometry fields.
+    """
+    if isinstance(obj, dict):
+        # If this dict itself looks like a data array with bytes values, fix it directly
+        if "values" in obj and isinstance(obj["values"], (bytes, bytearray, memoryview)):
+            # Try to infer dtype if present
+            dtype = VTKJS_TO_NUMPY.get(obj.get("dataType") or obj.get("dtype") or "Uint8Array", np.uint8)
+            ncomp = obj.get("numberOfComponents", 1)
+            size = obj.get("size")
+            wrapped = bytes_to_vtkjs_array(obj["values"], dtype=dtype, ncomp=ncomp, size=size, name=obj.get("name","Scalars"))
+            obj.update(wrapped)
+        
+        # Fix arrays in pointData/cellData (with or without 'data' wrapper)
+        for section in ("pointData", "cellData"):
+            sect = obj.get(section)
+            if isinstance(sect, dict) and isinstance(sect.get("arrays"), list):
+                for arr in sect["arrays"]:
+                    if isinstance(arr, dict):
+                        if "data" in arr and isinstance(arr["data"], dict):
+                            fix_vtkjs_binary_data(arr["data"])
+                        fix_vtkjs_binary_data(arr)  # in case 'values' is top-level
+        
+        # Fix common geometry containers
+        for geom in ("points", "verts", "lines", "polys", "strips"):
+            if geom in obj and isinstance(obj[geom], dict):
+                fix_vtkjs_binary_data(obj[geom])
+        
+        # Recurse all children
+        for v in obj.values():
+            if isinstance(v, dict):
+                fix_vtkjs_binary_data(v)
+            elif isinstance(v, list):
+                for it in v:
+                    if isinstance(it, dict):
+                        fix_vtkjs_binary_data(it)
+    
+    elif isinstance(obj, list):
+        for it in obj:
+            if isinstance(it, dict):
+                fix_vtkjs_binary_data(it)
+    
+    return obj
 
 def save_debug_segmentation(segmentation_array: np.ndarray, labels: List[Dict], request_id: str, original_nifti_path: str = None):
     """Save raw segmentation data for debugging"""
@@ -198,22 +358,6 @@ except ImportError as e:
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# VISTA3D Label mappings (from VolView vista3d-labels.ts)
-VISTA3D_LABELS = {
-    1: {"name": "liver", "category": "organs"},
-    2: {"name": "kidney", "category": "organs"},
-    3: {"name": "spleen", "category": "organs"},
-    4: {"name": "pancreas", "category": "organs"},
-    20: {"name": "lung", "category": "organs"},
-    22: {"name": "brain", "category": "organs"},
-    115: {"name": "heart", "category": "organs"},
-    121: {"name": "spinal_cord", "category": "nervous_system"},
-    120: {"name": "skull", "category": "bones"},
-    21: {"name": "bone", "category": "bones"},
-    37: {"name": "vertebrae_L1", "category": "bones"},
-    # Add more labels as needed
-}
 
 class Vista3DRequest(BaseModel):
     imageId: str
@@ -427,7 +571,8 @@ class Vista3DServer:
                 
                 # Set the output directory to our temp directory
                 output_dir = str(temp_path)
-                input_dict = f"{{'image':'{str(input_nifti_path)}', 'output_dir':'{output_dir}'}}"
+                # Use json.dumps for proper JSON formatting
+                input_dict = json.dumps({"image": str(input_nifti_path), "output_dir": output_dir})
                 cmd = [
                     sys.executable, "-m", "monai.bundle", "run",
                     "--config_file", str(config_file),
@@ -556,6 +701,9 @@ class Vista3DServer:
             # 🔧 DEBUG: Save raw segmentation data for debugging
             save_debug_segmentation(segmentation, labels, request.imageId, original_nifti_path)
             
+            # Convert segmentation to VTK labelmap format
+            labelmap_data = self._convert_to_vtk_labelmap(segmentation, original_nifti_path)
+            
             # 🔧 DEBUG: Save both conversion approaches for comparison
             try:
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -574,9 +722,6 @@ class Vista3DServer:
                     print(f"🔧 DEBUG: Saved VTK labelmap data to debug_outputs/vtk_labelmap_{request.imageId}_{timestamp}.json")
             except Exception as debug_error:
                 logger.warning(f"⚠️ Debug labelmap save failed: {debug_error}")
-            
-            # Convert segmentation to VTK labelmap format
-            labelmap_data = self._convert_to_vtk_labelmap(segmentation, original_nifti_path)
             
             processing_time = time.time() - start_time
             
@@ -608,6 +753,12 @@ class Vista3DServer:
             # Run actual VISTA3D inference
             segmentation, original_nifti_path = self._run_vista3d_inference(request)
             
+            # 🔧 FIX: Remap liver (label 1 → 101) to avoid VolView's default segment conflict
+            # Do this vectorized on server side for better performance
+            segmentation = segmentation.copy()
+            segmentation[segmentation == 1] = 101
+            logger.info("🔄 Remapped liver voxels from label 1 to 101 (avoiding VolView default segment)")
+            
             # Extract detected labels from segmentation
             labels = self._extract_detected_labels(segmentation, request.confidenceThreshold)
             
@@ -635,10 +786,13 @@ class Vista3DServer:
                 try:
                     logger.info("🔄 Using VolView transformers for proper ITK→VTK.js conversion...")
                     
-                    # Load the original MONAI result as ITK image
+                    # Load the original MONAI result as ITK image with uint8 pixel type
                     import itk
-                    itk_image = itk.imread(original_nifti_path)
+                    # Force uint8 pixel type for segmentation labels
+                    ImageType = itk.Image[itk.UC, 3]  # UC = unsigned char = uint8
+                    itk_image = itk.imread(original_nifti_path, pixel_type=itk.UC)
                     logger.info(f"  ITK image loaded: {itk_image.GetLargestPossibleRegion().GetSize()}")
+                    logger.info(f"  ITK pixel type: {type(itk_image).__name__}")
                     
                     # Convert ITK image to VTK.js format using VolView transformers
                     from volview_server.transformers import convert_itk_to_vtkjs_image
@@ -646,30 +800,32 @@ class Vista3DServer:
                     
                     logger.info("✅ Successfully converted using VolView transformers")
                     
-                    # 🔧 PROPER VTK.js SERIALIZATION: Following ChatGPT's advice
-                    # Handle VTK.js binary data with proper base64+gzip encoding
+                    # 🔧 PROPER VTK.js SERIALIZATION: Fix bytes objects to base64 strings
                     if isinstance(vtkjs_result, dict):
                         try:
-                            encoded_result = self._encode_vtkjs_inplace_gz(vtkjs_result)
-                            logger.info("✅ VTK.js binary data encoded with base64+gzip")
-                            return json.dumps(encoded_result)
+                            # Apply ChatGPT's fix: convert all bytes objects to base64 strings
+                            fixed_result = fix_vtkjs_binary_data(vtkjs_result)
+                            logger.info("✅ VTK.js binary data converted to base64 strings")
+                            
+                            # Now JSON serialization should work
+                            json_str = json.dumps(fixed_result)
+                            logger.info("✅ JSON serialization successful!")
+                            return json_str
+                            
                         except Exception as encoding_error:
                             logger.error(f"❌ VTK.js encoding failed: {encoding_error}")
-                            logger.info("Falling back to simple base64 encoding...")
-                            
-                            # Simple fallback encoding
-                            if (vtkjs_result.get('pointData') and 
-                                vtkjs_result['pointData'].get('arrays') and 
-                                len(vtkjs_result['pointData']['arrays']) > 0):
-                                
-                                array_data = vtkjs_result['pointData']['arrays'][0]
-                                if 'values' in array_data:
-                                    import base64
-                                    values_bytes = np.array(array_data['values'], dtype=np.uint8).tobytes()
-                                    array_data['values'] = base64.b64encode(values_bytes).decode('ascii')
-                                    array_data['_encoded'] = True
-                            
-                            return json.dumps(vtkjs_result)
+                            # Find problematic objects for debugging
+                            def find_bytes_objects(obj, path=""):
+                                if isinstance(obj, bytes):
+                                    logger.error(f"  Found bytes object at: {path}")
+                                elif isinstance(obj, dict):
+                                    for k, v in obj.items():
+                                        find_bytes_objects(v, f"{path}.{k}")
+                                elif isinstance(obj, list):
+                                    for i, v in enumerate(obj):
+                                        find_bytes_objects(v, f"{path}[{i}]")
+                            find_bytes_objects(vtkjs_result)
+                            raise encoding_error
                     else:
                         logger.warning("VTK.js result is not a dict, using fallback")
                         return None
@@ -775,10 +931,12 @@ class Vista3DServer:
             sect = ds.get(section)
             if isinstance(sect, dict) and isinstance(sect.get("arrays"), list):
                 for arr in sect["arrays"]:
-                    values = arr.get("values")
+                    # Prefer 'data' wrapper if present
+                    target = arr.get("data", arr)
+                    values = target.get("values")
                     encoded = self._encode_array_gz(values)
                     if encoded:
-                        arr.update(encoded)
+                        target.update(encoded)
         
         # Handle pointData and cellData arrays
         for section in ("pointData", "cellData"):
@@ -803,7 +961,7 @@ app.add_middleware(GZipMiddleware, minimum_size=500)
 # Enable CORS for VolView frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8082", "http://localhost:8080"],
+    allow_origins=["http://localhost:8082", "http://localhost:8080", "http://localhost:8083", "http://localhost:8084"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -815,7 +973,22 @@ vista3d_server = Vista3DServer()
 @app.post("/api/vista3d_analysis", response_model=Vista3DResponse)
 async def analyze_image(request: Vista3DRequest):
     """VISTA3D analysis endpoint"""
-    return await vista3d_server.analyze_image(request)
+    logger.info(f"🔍 DEBUG: Received VISTA3D analysis request")
+    logger.info(f"   - imageId: {request.imageId}")
+    logger.info(f"   - confidenceThreshold: {request.confidenceThreshold}")
+    logger.info(f"   - segmentEverything: {request.segmentEverything}")
+    logger.info(f"   - imageData type: {type(request.imageData)}")
+    if isinstance(request.imageData, dict):
+        logger.info(f"   - vtkClass: {request.imageData.get('vtkClass', 'Missing')}")
+        logger.info(f"   - imageData keys: {list(request.imageData.keys())}")
+    
+    try:
+        result = await vista3d_server.analyze_image(request)
+        logger.info(f"✅ Analysis completed successfully")
+        return result
+    except Exception as e:
+        logger.error(f"❌ Analysis failed: {str(e)}")
+        raise
 
 @app.get("/api/health")
 async def health_check():
