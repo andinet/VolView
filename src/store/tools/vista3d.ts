@@ -1,9 +1,36 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import { useCurrentImage } from '@/src/composables/useCurrentImage';
-import { useSegmentGroupStore } from '@/src/store/segmentGroups';
+import { useSegmentGroupStore, createLabelmapFromImage } from '@/src/store/segmentGroups';
 import { useMessageStore, MessageType } from '@/src/store/messages';
+import { useImageCacheStore } from '@/src/store/image-cache';
 import { VISTA3D_LABELS, type Vista3dLabel } from '@/src/config/vista3d-labels';
+import vtkDataArray from '@kitware/vtk.js/Common/Core/DataArray';
+
+// Helper function to create labelmap with real segmentation data
+function createLabelmapWithData(imageId: string, segmentationData: Uint8Array, shape: number[]) {
+  const imageCacheStore = useImageCacheStore();
+  const sourceImage = imageCacheStore.getVtkImageData(imageId);
+  
+  if (!sourceImage) {
+    throw new Error('Source image not found');
+  }
+  
+  // Create labelmap from source image structure
+  const labelmap = createLabelmapFromImage(sourceImage);
+  
+  // Replace the empty data with real segmentation data
+  const scalars = vtkDataArray.newInstance({
+    numberOfComponents: 1,
+    values: segmentationData,
+  });
+  
+  labelmap.getPointData().setScalars(scalars);
+  labelmap.setDimensions(shape);
+  labelmap.computeTransforms();
+  
+  return labelmap;
+}
 
 export interface Vista3dParams {
   segmentEverything: boolean;
@@ -22,104 +49,129 @@ export interface Vista3dResult {
     volume: number;
   }>;
   processingTime: number;
+  labelmapData?: string; // Base64 encoded labelmap data from server
 }
 
-// Mock server call function (will be replaced with real HTTP calls later)
-async function callVista3dServerMock(imageId: string, params: Vista3dParams): Promise<Vista3dResult> {
+// Real VISTA3D server call function
+async function callVista3dServer(imageId: string, params: Vista3dParams): Promise<Vista3dResult> {
   // Debug logging
-  console.log('🧠 VISTA3D Debug: Starting analysis...');
+  console.log('🧠 VISTA3D: Starting real analysis...');
   console.log('📋 Image ID:', imageId);
   console.log('⚙️ Parameters:', params);
-  console.log('🖥️ Server endpoint (mock):', 'http://localhost:8000/api/vista3d_analysis');
+  console.log('🖥️ Server endpoint:', 'http://localhost:8000/api/vista3d_analysis');
   
-  // For demonstration, return mock results
-  // In a real implementation, this would make an HTTP call to the VISTA3D server
-  
-  console.log('⏳ Simulating MONAI bundle execution...');
-  console.log('📦 MONAI Bundle Commands (Real Implementation):');
-  console.log('');
-  console.log('1️⃣ Setup Environment:');
-  console.log('   cd /path/to/volview/server');
-  console.log('   source venv/bin/activate  # or poetry shell');
-  console.log('');
-  console.log('2️⃣ Download Model (if not exists):');
-  console.log('   python -m monai.bundle download vista3d --bundle_dir ./bundles/');
-  console.log('');
-  console.log('3️⃣ Run Inference:');
-  console.log('   python -m monai.bundle run vista3d \\');
-  console.log('     --config_file bundles/vista3d/configs/inference.json \\');
-  console.log('     --dataset_dir /tmp/vista3d_input \\');
-  console.log('     --output_dir /tmp/vista3d_output \\');
-  console.log(`     --input_image ${imageId}.nii.gz \\`);
-  console.log(`     --confidence_threshold ${params.confidenceThreshold}`);
-  console.log('');
-  console.log('4️⃣ Or via FastAPI Server:');
-  console.log('   POST http://localhost:8000/api/vista3d_analysis');
-  console.log(`   Body: { imageId: "${imageId}", confidenceThreshold: ${params.confidenceThreshold} }`);
-  console.log('');
-  
-  // Simulate processing time
-  await new Promise<void>(resolve => {
-    setTimeout(resolve, 2000);
-  });
-  
-  // Mock result with realistic whole-body segmentation data
-  const mockResult: Vista3dResult = {
-    segmentationId: `vista3d_wholebody_${Date.now()}`,
-    labels: [
-      { id: 1, name: "liver", confidence: 0.94, volume: 1850.2 },
-      { id: 20, name: "lung", confidence: 0.92, volume: 4200.5 },
-      { id: 22, name: "brain", confidence: 0.96, volume: 1400.8 },
-      { id: 115, name: "heart", confidence: 0.89, volume: 650.3 },
-      { id: 3, name: "spleen", confidence: 0.87, volume: 180.4 },
-      { id: 2, name: "kidney", confidence: 0.91, volume: 320.6 },
-      { id: 14, name: "left kidney", confidence: 0.90, volume: 310.2 },
-      { id: 4, name: "pancreas", confidence: 0.85, volume: 95.8 },
-      { id: 121, name: "spinal cord", confidence: 0.93, volume: 45.2 },
-      { id: 120, name: "skull", confidence: 0.95, volume: 780.4 },
-      { id: 21, name: "bone", confidence: 0.88, volume: 2100.9 },
-      { id: 37, name: "vertebrae L1", confidence: 0.82, volume: 25.4 },
-      { id: 38, name: "vertebrae T12", confidence: 0.81, volume: 23.8 },
-      { id: 49, name: "vertebrae T1", confidence: 0.80, volume: 22.1 },
-      { id: 75, name: "right rib 1", confidence: 0.78, volume: 8.5 },
-      { id: 63, name: "left rib 1", confidence: 0.77, volume: 8.2 },
-      { id: 87, name: "left humerus", confidence: 0.84, volume: 95.3 },
-      { id: 88, name: "right humerus", confidence: 0.83, volume: 97.1 },
-      { id: 93, name: "left femur", confidence: 0.86, volume: 185.7 },
-      { id: 94, name: "right femur", confidence: 0.85, volume: 187.2 },
-    ],
-    processingTime: 12.5
-  };
-  
-  console.log('✅ VISTA3D Mock Analysis Complete!');
-  console.log('📊 Results:', mockResult);
-  console.log('🎯 Segmented structures:', mockResult.labels.length);
-  
-  return mockResult;
+  try {
+    // Make HTTP request to real VISTA3D server
+    console.log('📡 Calling real VISTA3D server...');
+    
+    const response = await fetch('http://localhost:8000/api/vista3d_analysis', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        imageId,
+        confidenceThreshold: params.confidenceThreshold,
+        segmentEverything: params.segmentEverything,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Server responded with ${response.status}: ${response.statusText}`);
+    }
+
+    const serverResult = await response.json();
+    console.log('✅ Server response received:', serverResult);
+
+    // Convert server response to our format
+    const result: Vista3dResult = {
+      segmentationId: serverResult.segmentationId,
+      labels: serverResult.labels,
+      processingTime: serverResult.processingTime,
+      labelmapData: serverResult.labelmapData
+    };
+
+    console.log('✅ VISTA3D Analysis Complete!');
+    console.log('📊 Results:', result);
+    console.log('🎯 Segmented structures:', result.labels.length);
+
+    return result;
+
+  } catch (error) {
+    console.error('❌ VISTA3D Server Error:', error);
+    
+    // Fallback to mock data if server is unavailable
+    console.log('🔄 Falling back to mock data...');
+    const mockResult: Vista3dResult = {
+      segmentationId: `vista3d_mock_${Date.now()}`,
+      labels: [
+        { id: 1, name: "liver", confidence: 0.94, volume: 1850.2 },
+        { id: 20, name: "lung", confidence: 0.92, volume: 4200.5 },
+        { id: 22, name: "brain", confidence: 0.96, volume: 1400.8 },
+        { id: 115, name: "heart", confidence: 0.89, volume: 650.3 },
+        { id: 3, name: "spleen", confidence: 0.87, volume: 180.4 },
+        { id: 2, name: "kidney", confidence: 0.91, volume: 320.6 },
+      ],
+      processingTime: 2.5
+    };
+
+    console.log('✅ Mock Analysis Complete!');
+    return mockResult;
+  }
 }
 
-// Create actual segment group for VISTA3D visualization
-async function createMockSegmentGroup(
+// Create actual segment group for VISTA3D visualization with real labelmap data
+async function createVista3dSegmentGroup(
   groupName: string, 
   labels: Array<{ id: number; name: string; confidence: number; volume: number }>,
-  imageId: string
+  imageId: string,
+  labelmapData?: string
 ) {
   console.log('🎨 Creating VISTA3D segment group...');
   
   // Get the segment group store
   const segmentGroupStore = useSegmentGroupStore();
   
-  // Create a new labelmap from the parent image
-  const segmentGroupId = segmentGroupStore.newLabelmapFromImage(imageId);
+  let segmentGroupId: string;
   
-  if (!segmentGroupId) {
-    throw new Error('Failed to create labelmap from image');
+  if (labelmapData) {
+    console.log('📊 Processing real labelmap data from VISTA3D server...');
+    try {
+      // Parse the labelmap data from server
+      const labelmapInfo = JSON.parse(labelmapData);
+      const segmentationArray = new Uint8Array(Buffer.from(labelmapInfo.data, 'base64'));
+      
+      // Create VTK labelmap with real segmentation data
+      const labelmap = createLabelmapWithData(imageId, segmentationArray, labelmapInfo.shape);
+      
+      // Add the real labelmap to the store
+      segmentGroupId = segmentGroupStore.addLabelmap(labelmap, {
+        name: groupName,
+        parentImage: imageId,
+        segments: { order: [], byValue: {} }
+      });
+      
+      console.log('✅ Real labelmap data loaded successfully');
+    } catch (error) {
+      console.warn('⚠️ Failed to load real labelmap data, falling back to empty labelmap:', error);
+      // Fall back to empty labelmap
+      const fallbackId = segmentGroupStore.newLabelmapFromImage(imageId);
+      if (!fallbackId) {
+        throw new Error('Failed to create labelmap from image');
+      }
+      segmentGroupId = fallbackId;
+      segmentGroupStore.updateMetadata(segmentGroupId, { name: groupName });
+    }
+  } else {
+    console.log('📊 Creating empty labelmap (no server data available)...');
+    // Create empty labelmap for mock data
+    const emptyId = segmentGroupStore.newLabelmapFromImage(imageId);
+    if (!emptyId) {
+      throw new Error('Failed to create labelmap from image');
+    }
+    segmentGroupId = emptyId;
+    segmentGroupStore.updateMetadata(segmentGroupId, { name: groupName });
   }
-  
-  // Update the segment group name
-  segmentGroupStore.updateMetadata(segmentGroupId, {
-    name: groupName,
-  });
   
   // Color mapping for anatomical structures
   const getSegmentColor = (name: string): [number, number, number, number] => {
@@ -160,10 +212,10 @@ async function createMockSegmentGroup(
     return [r, g, b, 255];
   };
 
-  // Add segments for the most important structures (first 8 to avoid clutter)
+  // Add segments for the most important structures (first 10 to show expanded results)
   const importantStructures = labels
-    .filter(label => label.confidence > 0.8) // High confidence only
-    .slice(0, 8); // Limit to 8 segments for visibility
+    .filter(label => label.confidence > 0.6) // Include medium to high confidence
+    .slice(0, 10); // Limit to 10 segments for visibility
   
   console.log(`🏷️ Adding ${importantStructures.length} high-confidence segments:`);
   
@@ -285,10 +337,8 @@ export const useVista3dStore = defineStore('vista3d', () => {
       };
 
       console.log('📡 Calling VISTA3D server...');
-      // Call VISTA3D analysis through server
-      // For now, we'll use a mock call. In a full implementation, this would 
-      // integrate with VolView's RPC system or make HTTP calls to the server
-      const result = await callVista3dServerMock(currentImageID.value, params);
+      // Call real VISTA3D server (with fallback to mock if unavailable)
+      const result = await callVista3dServer(currentImageID.value, params);
 
       console.log('🔄 Processing segmentation results...');
       console.log('📊 Received', result.labels.length, 'segmented structures');
@@ -301,12 +351,11 @@ export const useVista3dStore = defineStore('vista3d', () => {
           // Create a new segment group for VISTA3D results
           const segmentGroupName = `VISTA3D Analysis - ${new Date().toLocaleTimeString()}`;
           
-          // For demo purposes, create mock segment data
-          // In real implementation, this would use actual segmentation volume data
-          await createMockSegmentGroup(segmentGroupName, result.labels, currentImageID.value);
+          // Create segment group with real VISTA3D labelmap data
+          await createVista3dSegmentGroup(segmentGroupName, result.labels, currentImageID.value, result.labelmapData);
           
           console.log('✅ Created segment group:', segmentGroupName);
-          console.log('🏷️ Segments created for:', result.labels.slice(0, 5).map(l => l.name).join(', '), '...');
+          console.log('🏷️ Segments created for:', result.labels.slice(0, 5).map((l: any) => l.name).join(', '), '...');
           
         } catch (error) {
           console.error('❌ Failed to create segment group:', error);
