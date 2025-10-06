@@ -24,6 +24,9 @@ yarn-error.log*
 __pycache__
 venv
 
+# VISTA3D debug outputs (raw segmentation data)
+server/debug_outputs/
+
 bundle-analysis.html
 
 # Local Netlify folder

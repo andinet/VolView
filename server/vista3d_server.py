@@ -12,6 +12,72 @@ import numpy as np
 from pathlib import Path
 from typing import Dict, List, Optional
 import logging
+from datetime import datetime
+
+def save_debug_segmentation(segmentation_array: np.ndarray, labels: List[Dict], request_id: str):
+    """Save raw segmentation data for debugging"""
+    try:
+        debug_dir = Path("debug_outputs")
+        debug_dir.mkdir(exist_ok=True)
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # Save raw numpy array (can be loaded with np.load())
+        np.save(f"debug_outputs/segmentation_{request_id}_{timestamp}.npy", 
+                segmentation_array)
+        
+        # Save as NRRD for easy viewing in ITK-SNAP, 3D Slicer, etc.
+        try:
+            import nrrd
+            # NRRD expects data in different axis order (z, y, x)
+            nrrd_data = np.transpose(segmentation_array, (2, 1, 0))
+            
+            # Create NRRD header with proper spacing and metadata
+            nrrd_header = {
+                'space': 'left-posterior-superior',
+                'space directions': [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                'space origin': [0.0, 0.0, 0.0],
+                'encoding': 'gzip'
+            }
+            
+            nrrd.write(f"debug_outputs/segmentation_{request_id}_{timestamp}.nrrd", 
+                      nrrd_data, header=nrrd_header)
+            
+            print(f"🔧 DEBUG: Saved NRRD file to debug_outputs/segmentation_{request_id}_{timestamp}.nrrd")
+            
+        except Exception as nrrd_error:
+            print(f"⚠️ DEBUG: NRRD save failed: {nrrd_error}")
+        
+        # Save labels metadata as JSON
+        debug_info = {
+            'request_id': request_id,
+            'timestamp': timestamp,
+            'shape': segmentation_array.shape,
+            'dtype': str(segmentation_array.dtype),
+            'unique_values': np.unique(segmentation_array).tolist(),
+            'labels': labels,
+            'total_structures_generated': len(labels),
+            'min_value': int(segmentation_array.min()),
+            'max_value': int(segmentation_array.max()),
+            'non_zero_voxels': int(np.count_nonzero(segmentation_array)),
+            'total_voxels': int(segmentation_array.size),
+            'nrrd_file': f"segmentation_{request_id}_{timestamp}.nrrd",
+            'viewing_instructions': {
+                'ITK-SNAP': 'File → Open Segmentation → Select .nrrd file',
+                '3D_Slicer': 'File → Add Data → Select .nrrd file → Check as Labelmap',
+                'ImageJ': 'File → Import → NRRD → Select file'
+            }
+        }
+        
+        with open(f"debug_outputs/metadata_{request_id}_{timestamp}.json", 'w') as f:
+            json.dump(debug_info, f, indent=2)
+            
+        print(f"🔧 DEBUG: Saved numpy array to debug_outputs/segmentation_{request_id}_{timestamp}.npy")
+        print(f"🔧 DEBUG: Saved metadata to debug_outputs/metadata_{request_id}_{timestamp}.json")
+        print(f"📺 VIEWING: Open the .nrrd file in ITK-SNAP or 3D Slicer for visualization")
+        
+    except Exception as e:
+        print(f"⚠️ DEBUG: Failed to save debug data: {e}")
 
 # VISTA3D anatomical structure labels (subset of 130+ structures)
 VISTA3D_LABELS = {
@@ -446,6 +512,9 @@ class Vista3DServer:
             else:
                 # Mock analysis for development
                 segmentation, labels = await self._run_mock_vista3d(request)
+            
+            # 🔧 DEBUG: Save raw segmentation data for debugging
+            save_debug_segmentation(segmentation, labels, request.imageId)
             
             # Convert segmentation to VTK labelmap format
             labelmap_data = self._convert_to_vtk_labelmap(segmentation)
