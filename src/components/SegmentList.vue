@@ -28,7 +28,9 @@ const segmentGroupStore = useSegmentGroupStore();
 const paintStore = usePaintToolStore();
 
 const segments = computed<SegmentMask[]>(() => {
-  return segmentGroupStore.segmentByGroupID[groupId.value] ?? [];
+  const segs = segmentGroupStore.segmentByGroupID[groupId.value] ?? [];
+  console.log(`🔍 SegmentList: groupId=${groupId.value}, segments count=${segs.length}`, segs);
+  return segs;
 });
 
 function addNewSegment() {
@@ -277,15 +279,16 @@ const toggleLock = (value: number) => {
     </v-btn>
   </div>
 
-  <editable-chip-list
-    v-model="selectedSegment"
-    :items="segments"
-    item-key="value"
-    item-title="name"
-    create-label-text="New segment"
-    @create="addNewSegment"
-    class="my-4"
-  >
+  <div class="segments-container">
+    <editable-chip-list
+      v-model="selectedSegment"
+      :items="segments"
+      item-key="value"
+      item-title="name"
+      create-label-text="New segment"
+      @create="addNewSegment"
+      class="my-4"
+    >
     <template #item-prepend="{ item }">
       <!-- dot container keeps overflowing name from squishing dot width  -->
       <div class="dot-container mr-3">
@@ -346,6 +349,7 @@ const toggleLock = (value: number) => {
       />
     </template>
   </editable-chip-list>
+  </div>
 
   <isolated-dialog v-model="editDialog" @keydown.stop max-width="800px">
     <segment-editor
@@ -364,5 +368,11 @@ const toggleLock = (value: number) => {
 <style scoped>
 .dot-container {
   width: 18px;
+}
+
+.segments-container {
+  max-height: 400px;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 </style>

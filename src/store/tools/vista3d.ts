@@ -4,6 +4,7 @@ import { useCurrentImage } from '@/src/composables/useCurrentImage';
 import { useSegmentGroupStore, createLabelmapFromImage } from '@/src/store/segmentGroups';
 import { useMessageStore, MessageType } from '@/src/store/messages';
 import { useImageCacheStore } from '@/src/store/image-cache';
+import { usePaintToolStore } from '@/src/store/tools/paint';
 import { VISTA3D_LABELS, type Vista3dLabel } from '@/src/config/vista3d-labels';
 import vtkDataArray from '@kitware/vtk.js/Common/Core/DataArray';
 
@@ -442,12 +443,11 @@ async function createVista3dSegmentGroup(
     return [r, g, b, 255];
   };
 
-  // Add segments for the most important structures (first 10 to show expanded results)
+  // Add all segments with any detected confidence (no limit on number of segments)
   const importantStructures = labels
-    .filter(label => label.confidence > 0.6) // Include medium to high confidence
-    .slice(0, 10); // Limit to 10 segments for visibility
+    .filter(label => label.confidence > 0.0); // Include all detected structures
   
-  console.log(`🏷️ Adding ${importantStructures.length} high-confidence segments:`);
+  console.log(`🏷️ Adding ${importantStructures.length} segments:`);
   
   // Note: Using actual VISTA3D label IDs as segment values
   
@@ -476,6 +476,11 @@ async function createVista3dSegmentGroup(
   
   console.log(`🎯 Created segment group "${groupName}" with ID: ${segmentGroupId}`);
   console.log(`📊 Total segments: ${importantStructures.length}`);
+  
+  // 🎯 Set as active segment group so UI displays the segments
+  const paintStore = usePaintToolStore();
+  paintStore.setActiveSegmentGroup(segmentGroupId);
+  console.log(`✅ Set active segment group to: ${segmentGroupId}`);
   
   // 🔍 DEBUG: Comprehensive segment overlay validation
   console.log('🔍 [VISTA3D DEBUG] Validating segment overlay alignment...');
@@ -565,7 +570,7 @@ export const useVista3dStore = defineStore('vista3d', () => {
   // VISTA3D Parameters - Always automatic whole-body segmentation
   const segmentEverything = ref(true);
   const selectedLabels = ref<number[]>([]);
-  const confidenceThreshold = ref(0.5);
+  const confidenceThreshold = ref(0.10);
   const usePointPrompts = ref(false);
   const pointPrompts = ref<Array<{ point: [number, number, number]; label: number }>>([]);
 
