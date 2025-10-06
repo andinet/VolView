@@ -7,6 +7,77 @@ import { useImageCacheStore } from '@/src/store/image-cache';
 import { VISTA3D_LABELS, type Vista3dLabel } from '@/src/config/vista3d-labels';
 import vtkDataArray from '@kitware/vtk.js/Common/Core/DataArray';
 
+// 🚀 VTK.js decoding functions (following ChatGPT's recommendations)
+function base64ToUint8Array(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+async function gunzipUint8Array(dataU8: Uint8Array): Promise<Uint8Array> {
+  if ('DecompressionStream' in globalThis) {
+    const ds = new DecompressionStream('gzip');
+    const stream = new Response(
+      new Blob([dataU8] as BlobPart[]).stream().pipeThrough(ds)
+    );
+    const buf = await stream.arrayBuffer();
+    return new Uint8Array(buf);
+  }
+  throw new Error('No gunzip available: use a DecompressionStream-capable browser');
+}
+
+function typedArrayCtor(dtype: string): any {
+  return ({
+    Uint8Array, Int8Array, Uint16Array, Int16Array,
+    Uint32Array, Int32Array, Float32Array, Float64Array
+  }[dtype]) || Uint8Array;
+}
+
+async function decodeArrayFieldInPlace(arrObj: any): Promise<void> {
+  const isGz = arrObj.valuesCompression === 'gzip';
+  const isB64 = arrObj.valuesEncoding === 'base64';
+  if (!isB64 || typeof arrObj.values !== 'string') return;
+
+  // base64 -> bytes
+  let bytes = base64ToUint8Array(arrObj.values);
+
+  // gunzip if needed
+  if (isGz) bytes = await gunzipUint8Array(bytes);
+
+  const Ctor = typedArrayCtor(arrObj.dtype);
+  // eslint-disable-next-line no-param-reassign
+  arrObj.values = new Ctor(
+    bytes.buffer, bytes.byteOffset, bytes.byteLength / Ctor.BYTES_PER_ELEMENT
+  );
+
+  // eslint-disable-next-line no-param-reassign
+  delete arrObj.valuesEncoding;
+  // eslint-disable-next-line no-param-reassign
+  delete arrObj.valuesCompression;
+}
+
+async function decodeVtkJsInPlace(ds: any): Promise<any> {
+  const tasks: Promise<void>[] = [];
+
+  const fixArrayList = (section: string) => {
+    const arrays = ds?.[section]?.arrays;
+    if (Array.isArray(arrays)) {
+      arrays.forEach((a: any) => tasks.push(decodeArrayFieldInPlace(a)));
+    }
+  };
+
+  fixArrayList('pointData');
+  fixArrayList('cellData');
+
+  ['points','verts','lines','polys','strips'].forEach((k) => {
+    if (ds?.[k]?.values) tasks.push(decodeArrayFieldInPlace(ds[k]));
+  });
+
+  await Promise.all(tasks);
+  return ds;
+}
+
 // Helper function to create labelmap with real segmentation data
 function createLabelmapWithData(imageId: string, segmentationData: Uint8Array, shape: number[]) {
   const imageCacheStore = useImageCacheStore();
@@ -31,6 +102,8 @@ function createLabelmapWithData(imageId: string, segmentationData: Uint8Array, s
   
   return labelmap;
 }
+
+
 
 export interface Vista3dParams {
   segmentEverything: boolean;
@@ -58,19 +131,32 @@ async function callVista3dServer(imageId: string, params: Vista3dParams): Promis
   console.log('🧠 VISTA3D: Starting real analysis...');
   console.log('📋 Image ID:', imageId);
   console.log('⚙️ Parameters:', params);
-  console.log('🖥️ Server endpoint:', 'http://localhost:8000/api/vista3d_analysis');
+  console.log('🖥️ Server endpoint:', 'http://localhost:8081/api/vista3d_analysis');
   
   try {
     // Make HTTP request to real VISTA3D server
     console.log('📡 Calling real VISTA3D server...');
     
-    const response = await fetch('http://localhost:8000/api/vista3d_analysis', {
+    // Get the actual image data for processing
+    const imageCacheStore = useImageCacheStore();
+    const sourceImage = imageCacheStore.getVtkImageData(imageId);
+    
+    if (!sourceImage) {
+      throw new Error(`Image with ID ${imageId} not found`);
+    }
+    
+    // Serialize the VTK image data for the server
+    const serializedImageData = sourceImage.toJSON();
+    console.log('📦 Serialized image data:', serializedImageData);
+    
+    const response = await fetch('http://localhost:8081/api/vista3d_analysis', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
         imageId,
+        imageData: serializedImageData,
         confidenceThreshold: params.confidenceThreshold,
         segmentEverything: params.segmentEverything,
       }),
@@ -137,12 +223,67 @@ async function createVista3dSegmentGroup(
   if (labelmapData) {
     console.log('📊 Processing real labelmap data from VISTA3D server...');
     try {
-      // Parse the labelmap data from server
-      const labelmapInfo = JSON.parse(labelmapData);
-      const segmentationArray = new Uint8Array(Buffer.from(labelmapInfo.data, 'base64'));
+      let segmentationArray: Uint8Array;
+      let shape: number[];
+      
+      if (typeof labelmapData === 'string') {
+        // Parse JSON string format 
+        const labelmapInfo = JSON.parse(labelmapData);
+        
+        if (labelmapInfo.conversion_method === 'direct_numpy') {
+          console.log('🔄 Processing direct numpy conversion format...');
+          // Fallback numpy format
+          const binaryString = atob(labelmapInfo.data);
+          segmentationArray = new Uint8Array(binaryString.length);
+          for (let i = 0; i < binaryString.length; i++) {
+            segmentationArray[i] = binaryString.charCodeAt(i);
+          }
+          shape = labelmapInfo.shape;
+        } else {
+          // 🚀 NEW: Proper VTK.js format with gzip+base64 decoding
+          console.log('🔄 Processing VTK.js format with proper decoding...');
+          await decodeVtkJsInPlace(labelmapInfo);
+          
+          if (labelmapInfo.pointData && labelmapInfo.pointData.arrays && labelmapInfo.pointData.arrays.length > 0) {
+            const arrayData = labelmapInfo.pointData.arrays[0];
+            segmentationArray = new Uint8Array(arrayData.values);
+            
+            // Calculate shape from extent
+            const extent = labelmapInfo.extent;
+            shape = [
+              extent[1] - extent[0] + 1,
+              extent[3] - extent[2] + 1,
+              extent[5] - extent[4] + 1
+            ];
+          } else {
+            throw new Error('Invalid VTK.js format: missing point data');
+          }
+        }
+      } else {
+        // 🚀 NEW: Direct VTK.js format object with proper decoding
+        console.log('🔄 Processing direct VTK.js object format with proper decoding...');
+        const vtkjsObj = labelmapData as any;
+        
+        await decodeVtkJsInPlace(vtkjsObj);
+        
+        if (vtkjsObj.pointData && vtkjsObj.pointData.arrays && vtkjsObj.pointData.arrays.length > 0) {
+          const arrayData = vtkjsObj.pointData.arrays[0];
+          segmentationArray = new Uint8Array(arrayData.values);
+          
+          // Calculate shape from extent
+          const extent = vtkjsObj.extent;
+          shape = [
+            extent[1] - extent[0] + 1,
+            extent[3] - extent[2] + 1,
+            extent[5] - extent[4] + 1
+          ];
+        } else {
+          throw new Error('Invalid VTK.js format: missing point data');
+        }
+      }
       
       // Create VTK labelmap with real segmentation data
-      const labelmap = createLabelmapWithData(imageId, segmentationArray, labelmapInfo.shape);
+      const labelmap = createLabelmapWithData(imageId, segmentationArray, shape);
       
       // Add the real labelmap to the store
       segmentGroupId = segmentGroupStore.addLabelmap(labelmap, {
@@ -163,14 +304,15 @@ async function createVista3dSegmentGroup(
       segmentGroupStore.updateMetadata(segmentGroupId, { name: groupName });
     }
   } else {
-    console.log('📊 Creating empty labelmap (no server data available)...');
-    // Create empty labelmap for mock data
+    console.log('📊 Creating empty labelmap (server data not available)...');
+    // Create empty labelmap - segments will show in list but won't have voxel data until server works
     const emptyId = segmentGroupStore.newLabelmapFromImage(imageId);
     if (!emptyId) {
       throw new Error('Failed to create labelmap from image');
     }
     segmentGroupId = emptyId;
     segmentGroupStore.updateMetadata(segmentGroupId, { name: groupName });
+    console.log('⚠️ Note: Segments created but no voxel data (server issue needs to be fixed)');
   }
   
   // Color mapping for anatomical structures
@@ -219,9 +361,12 @@ async function createVista3dSegmentGroup(
   
   console.log(`🏷️ Adding ${importantStructures.length} high-confidence segments:`);
   
-  importantStructures.forEach((label, index) => {
+  // Note: Using actual VISTA3D label IDs as segment values
+  
+  importantStructures.forEach((label) => {
     const color = getSegmentColor(label.name);
-    const segmentValue = index + 1; // Start from 1 (0 is background)
+    // 🔧 FIX: Use the actual label ID from VISTA3D model (matches voxel values)
+    const segmentValue = label.id; // This matches the voxel values in the labelmap
     
     try {
       segmentGroupStore.addSegment(segmentGroupId, {

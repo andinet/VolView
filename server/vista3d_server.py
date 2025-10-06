@@ -13,14 +13,32 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import logging
 from datetime import datetime
+import itk
 
-def save_debug_segmentation(segmentation_array: np.ndarray, labels: List[Dict], request_id: str):
+# Import VolView server transformation functions
+sys.path.append(str(Path(__file__).parent / "volview_server"))
+try:
+    from volview_server.transformers import convert_vtkjs_to_itk_image, convert_itk_to_vtkjs_image
+    VOLVIEW_TRANSFORMERS_AVAILABLE = True
+    print("✅ VolView transformers loaded!")
+except ImportError as e:
+    print(f"⚠️ VolView transformers not available: {e}")
+    VOLVIEW_TRANSFORMERS_AVAILABLE = False
+
+def save_debug_segmentation(segmentation_array: np.ndarray, labels: List[Dict], request_id: str, original_nifti_path: str = None):
     """Save raw segmentation data for debugging"""
     try:
         debug_dir = Path("debug_outputs")
         debug_dir.mkdir(exist_ok=True)
         
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # 🆕 Save original MONAI bundle result as-is (NIfTI format)
+        if original_nifti_path and Path(original_nifti_path).exists():
+            debug_nifti_path = f"debug_outputs/monai_result_{request_id}_{timestamp}.nii.gz"
+            import shutil
+            shutil.copy2(original_nifti_path, debug_nifti_path)
+            print(f"🔧 DEBUG: Saved original MONAI bundle result as: {debug_nifti_path}")
         
         # Save raw numpy array (can be loaded with np.load())
         np.save(f"debug_outputs/segmentation_{request_id}_{timestamp}.npy", 
@@ -61,11 +79,16 @@ def save_debug_segmentation(segmentation_array: np.ndarray, labels: List[Dict], 
             'max_value': int(segmentation_array.max()),
             'non_zero_voxels': int(np.count_nonzero(segmentation_array)),
             'total_voxels': int(segmentation_array.size),
-            'nrrd_file': f"segmentation_{request_id}_{timestamp}.nrrd",
+            'files_generated': {
+                'numpy_array': f"segmentation_{request_id}_{timestamp}.npy",
+                'nrrd_file': f"segmentation_{request_id}_{timestamp}.nrrd",
+                'monai_original': f"monai_result_{request_id}_{timestamp}.nii.gz" if original_nifti_path else None
+            },
             'viewing_instructions': {
-                'ITK-SNAP': 'File → Open Segmentation → Select .nrrd file',
-                '3D_Slicer': 'File → Add Data → Select .nrrd file → Check as Labelmap',
-                'ImageJ': 'File → Import → NRRD → Select file'
+                'ITK-SNAP': 'File → Open Segmentation → Select .nrrd or .nii.gz file',
+                '3D_Slicer': 'File → Add Data → Select .nrrd or .nii.gz file → Check as Labelmap',
+                'ImageJ': 'File → Import → NRRD or NIfTI → Select file',
+                'Original_MONAI': 'Use monai_result_*.nii.gz for original MONAI bundle output'
             }
         }
         
@@ -194,6 +217,7 @@ VISTA3D_LABELS = {
 
 class Vista3DRequest(BaseModel):
     imageId: str
+    imageData: Dict  # Serialized VTK.js image data
     confidenceThreshold: float = 0.5
     segmentEverything: bool = True
 
@@ -214,7 +238,7 @@ class Vista3DServer:
     def _initialize_vista3d(self) -> bool:
         """Initialize VISTA3D bundle"""
         if not MONAI_AVAILABLE:
-            logger.warning("MONAI not available - using mock mode")
+            logger.error("MONAI not available - VISTA3D cannot run")
             return False
             
         try:
@@ -230,7 +254,7 @@ class Vista3DServer:
                 logger.info("VISTA3D bundle ready")
                 return True
             else:
-                logger.warning("VISTA3D config not found - using mock mode")
+                logger.error("VISTA3D config not found - bundle incomplete")
                 return False
                 
         except Exception as e:
@@ -265,202 +289,221 @@ class Vista3DServer:
             
             logger.info("Loading VISTA3D bundle configuration...")
             
-            # For demonstration, create a synthetic volume that would represent
-            # a real medical image loaded from VolView
-            # In production, this would load the actual image data from request.imageId
-            input_volume = self._create_synthetic_medical_volume()
+            # TODO: Load actual medical image data from VolView using request.imageId
+            # For now, this would need to be implemented to get real image data
+            # input_image_path = self._get_image_from_volview(request.imageId)
             
             logger.info("Running VISTA3D inference...")
             
-            # Use MONAI bundle workflow for inference if available
-            if MONAI_AVAILABLE and config_path.exists():
-                try:
-                    logger.info("Attempting to use real MONAI VISTA3D bundle...")
-                    
-                    workflow = ConfigWorkflow(
-                        config_paths=[str(config_path)],
-                        meta_file=str(bundle_path / "configs" / "metadata.json") if (bundle_path / "configs" / "metadata.json").exists() else None,
-                        logging_file=str(bundle_path / "configs" / "logging.conf") if (bundle_path / "configs" / "logging.conf").exists() else None
-                    )
-                    
-                    # Prepare input data for VISTA3D
-                    # In real implementation, this would be the actual medical image from VolView
-                    workflow.initialize()
-                    
-                    # For development: use realistic simulation
-                    # Production would call: workflow.run() with actual medical data
-                    segmentation = self._simulate_vista3d_output(input_volume)
-                    
-                except Exception as monai_error:
-                    logger.warning(f"MONAI bundle execution failed: {monai_error}")
-                    logger.info("Falling back to enhanced simulation...")
-                    segmentation = self._simulate_vista3d_output(input_volume)
-            else:
-                logger.info("Using VISTA3D simulation (MONAI bundle not fully configured)")
-                segmentation = self._simulate_vista3d_output(input_volume)
+            # Use MONAI bundle workflow for inference
+            if not MONAI_AVAILABLE:
+                raise RuntimeError("MONAI not available for VISTA3D inference")
             
-            logger.info("VISTA3D inference completed successfully")
-            return segmentation
+            # Use subprocess to run MONAI bundle (recommended approach)
+            import subprocess
+            import tempfile
+            
+            # Create temporary output directory
+            with tempfile.TemporaryDirectory() as temp_dir:
+                temp_path = Path(temp_dir)
+                output_path = temp_path / "segmentation.nii.gz"
+                
+                # Get image data from VolView request
+                if not hasattr(request, 'imageData') or not request.imageData:
+                    raise ValueError("No image data provided in request")
+                
+                # Convert VTK.js image data to ITK image using proper VolView transformers approach
+                # Import the correct transformer function from our local copy
+                from volview_server.transformers.image_data import vtk_to_itk_image
+                
+                logger.info(f"Converting VTK.js image data to ITK using VolView transformers...")
+                logger.info(f"VTK.js data type: {type(request.imageData)}")
+                logger.info(f"VTK.js data keys: {list(request.imageData.keys()) if isinstance(request.imageData, dict) else 'Not a dict'}")
+                
+                if isinstance(request.imageData, dict):
+                    logger.info(f"vtkClass: {request.imageData.get('vtkClass', 'Missing')}")
+                    logger.info(f"extent: {request.imageData.get('extent', 'Missing')}")
+                    logger.info(f"spacing: {request.imageData.get('spacing', 'Missing')}")
+                    logger.info(f"origin: {request.imageData.get('origin', 'Missing')}")
+                    logger.info(f"direction type: {type(request.imageData.get('direction', 'Missing'))}")
+                    if 'pointData' in request.imageData:
+                        logger.info(f"pointData keys: {list(request.imageData['pointData'].keys())}")
+                        if 'arrays' in request.imageData['pointData']:
+                            arrays = request.imageData['pointData']['arrays']
+                            logger.info(f"Number of arrays: {len(arrays)}")
+                            if len(arrays) > 0:
+                                first_array = arrays[0]
+                                logger.info(f"First array keys: {list(first_array.keys())}")
+                                if 'data' in first_array:
+                                    data_info = first_array['data']
+                                    logger.info(f"Array data keys: {list(data_info.keys())}")
+                                    logger.info(f"Array dataType: {data_info.get('dataType', 'Missing')}")
+                                    logger.info(f"Array size: {data_info.get('size', 'Missing')}")
+                                    logger.info(f"Values type: {type(data_info.get('values', 'Missing'))}")
+                
+                try:
+                    # The issue is that our VTK.js data has pixel values as a list, not bytes
+                    # Let's fix this by converting the list to bytes first
+                    vtkjs_data = request.imageData.copy()  # Make a copy to avoid modifying original
+                    
+                    if 'pointData' in vtkjs_data and 'arrays' in vtkjs_data['pointData']:
+                        arrays = vtkjs_data['pointData']['arrays']
+                        for array in arrays:
+                            if 'data' in array and 'values' in array['data']:
+                                values = array['data']['values']
+                                if isinstance(values, list):
+                                    logger.info("Converting pixel values from list to bytes...")
+                                    # Convert list to numpy array then to bytes
+                                    import numpy as np
+                                    dataType = array['data']['dataType']
+                                    
+                                    # Map VTK.js data types to numpy dtypes
+                                    dtype_map = {
+                                        'Int8Array': np.int8,
+                                        'Uint8Array': np.uint8,
+                                        'Int16Array': np.int16,
+                                        'Uint16Array': np.uint16,
+                                        'Int32Array': np.int32,
+                                        'Uint32Array': np.uint32,
+                                        'Float32Array': np.float32,
+                                        'Float64Array': np.float64
+                                    }
+                                    
+                                    if dataType in dtype_map:
+                                        np_dtype = dtype_map[dataType]
+                                        # Convert list to numpy array then to bytes
+                                        values_array = np.array(values, dtype=np_dtype)
+                                        array['data']['values'] = values_array.tobytes()
+                                        logger.info(f"Converted {len(values)} values from list to bytes")
+                    
+                    # Now use the VolView transformer function
+                    itk_image = vtk_to_itk_image(vtkjs_data)
+                    logger.info(f"Successfully converted to ITK image with size: {itk_image.GetLargestPossibleRegion().GetSize()}")
+                except Exception as e:
+                    logger.error(f"VTK to ITK conversion failed: {str(e)}")
+                    logger.error(f"Exception type: {type(e)}")
+                    # Let's try to see the detailed traceback
+                    import traceback
+                    logger.error(f"Full traceback: {traceback.format_exc()}")
+                    raise
+                
+                # Save ITK image as NIfTI for MONAI bundle
+                input_nifti_path = temp_path / "input.nii.gz"
+                itk.imwrite(itk_image, str(input_nifti_path))
+                
+                # DEBUGGING: Also save a copy to debug_outputs for inspection
+                debug_outputs_dir = Path("debug_outputs")
+                debug_outputs_dir.mkdir(exist_ok=True)
+                
+                from datetime import datetime
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                debug_input_path = debug_outputs_dir / f"input_converted_{request.imageId}_{timestamp}.nii.gz"
+                
+                # Copy the converted input file for debugging
+                import shutil
+                shutil.copy2(input_nifti_path, debug_input_path)
+                logger.info(f"🔧 DEBUG: Saved converted input NIfTI to {debug_input_path}")
+                
+                # Also save the original VTK.js data as JSON for comparison
+                debug_vtkjs_path = debug_outputs_dir / f"vtkjs_data_{request.imageId}_{timestamp}.json"
+                import json
+                with open(debug_vtkjs_path, 'w') as f:
+                    # Convert any bytes data to base64 for JSON serialization
+                    vtkjs_debug = request.imageData.copy()
+                    if 'pointData' in vtkjs_debug and 'arrays' in vtkjs_debug['pointData']:
+                        for array in vtkjs_debug['pointData']['arrays']:
+                            if 'data' in array and 'values' in array['data']:
+                                values = array['data']['values']
+                                if isinstance(values, bytes):
+                                    import base64
+                                    array['data']['values'] = base64.b64encode(values).decode('utf-8')
+                                    array['data']['_values_type'] = 'base64_bytes'
+                    json.dump(vtkjs_debug, f, indent=2)
+                logger.info(f"🔧 DEBUG: Saved original VTK.js data to {debug_vtkjs_path}")
+                
+                # Run real VISTA3D bundle inference
+                vista3d_bundle_path = self.bundle_root / "vista3d"
+                config_file = vista3d_bundle_path / "configs" / "inference.json"
+                
+                # Set the output directory to our temp directory
+                output_dir = str(temp_path)
+                input_dict = f"{{'image':'{str(input_nifti_path)}', 'output_dir':'{output_dir}'}}"
+                cmd = [
+                    sys.executable, "-m", "monai.bundle", "run",
+                    "--config_file", str(config_file),
+                    "--input_dict", input_dict,
+                    "--bundle_root", str(vista3d_bundle_path)
+                ]
+                
+                logger.info(f"Running VISTA3D: {' '.join(cmd)}")
+                logger.info(f"Working directory: {vista3d_bundle_path}")
+                
+                # Run the command from the vista3d bundle directory so scripts.inferer can be found
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, cwd=str(vista3d_bundle_path))
+                
+                logger.info(f"MONAI bundle stdout: {result.stdout}")
+                if result.stderr:
+                    logger.info(f"MONAI bundle stderr: {result.stderr}")
+                    
+                # List all files in temp directory to see what was actually created
+                import os
+                temp_files = os.listdir(temp_path)
+                logger.info(f"Files in temp directory after MONAI bundle: {temp_files}")
+                
+                if result.returncode != 0:
+                    error_msg = f"VISTA3D inference failed: {result.stderr}"
+                    logger.error(error_msg)
+                    raise RuntimeError(error_msg)
+                
+                # Load segmentation result from the actual MONAI bundle output location
+                import nibabel as nib
+                
+                # The MONAI bundle saves to eval/input/input_trans.nii.gz regardless of our output_dir setting
+                actual_output_path = vista3d_bundle_path / "eval" / "input" / "input_trans.nii.gz"
+                logger.info(f"Looking for segmentation result at: {actual_output_path}")
+                
+                if not actual_output_path.exists():
+                    # List all files in eval directory for debugging
+                    eval_dir = vista3d_bundle_path / "eval"
+                    if eval_dir.exists():
+                        import os
+                        for root, dirs, files in os.walk(eval_dir):
+                            for file in files:
+                                if file.endswith('.nii.gz'):
+                                    logger.info(f"Found output file: {os.path.join(root, file)}")
+                    raise FileNotFoundError(f"No such file or no access: '{actual_output_path}'")
+                
+                segmentation_nii = nib.load(actual_output_path)
+                segmentation = segmentation_nii.get_fdata().astype(np.uint8)
+                
+                logger.info(f"VISTA3D inference completed: {segmentation.shape}")
+                return segmentation, str(actual_output_path)
+                
+                # Example of what the real implementation would look like:
+                # cmd = [
+                #     sys.executable, "-m", "monai.bundle", "run", "vista3d",
+                #     "--input_image", str(input_image_path),
+                #     "--output_image", str(output_path),
+                #     "--bundle_dir", str(self.bundle_root)
+                # ]
+                # result = subprocess.run(cmd, capture_output=True, text=True)
+                # 
+                # if result.returncode != 0:
+                #     raise RuntimeError(f"VISTA3D inference failed: {result.stderr}")
+                # 
+                # # Load segmentation result
+                # import nibabel as nib
+                # segmentation_nii = nib.load(output_path)
+                # segmentation = segmentation_nii.get_fdata().astype(np.uint8)
+                # 
+                # logger.info("VISTA3D inference completed successfully")
+                # return segmentation
             
         except Exception as e:
             logger.error(f"VISTA3D inference failed: {e}")
-            # Return enhanced mock segmentation as fallback
-            return self._generate_realistic_anatomy_volume()
+            raise
     
-    def _create_synthetic_medical_volume(self) -> np.ndarray:
-        """Create a synthetic medical volume for testing"""
-        # Simulate a CT scan volume with reduced dimensions for faster processing
-        volume = np.random.normal(100, 50, (128, 128, 64)).astype(np.float32)
-        volume = np.clip(volume, 0, 255)
-        return volume
-    
-    def _simulate_vista3d_output(self, input_volume: np.ndarray) -> np.ndarray:
-        """Simulate VISTA3D segmentation output"""
-        logger.info("Simulating VISTA3D segmentation output...")
-        
-        # Use smaller dimensions for faster processing and transfer
-        # This represents a downsampled segmentation that would be upsampled in VolView
-        dims = (128, 128, 64)  # Reduced from 256x256x128
-        segmentation = np.zeros(dims, dtype=np.uint8)
-        
-        # Generate realistic anatomical structures based on VISTA3D labels
-        structures = self._generate_vista3d_structures(dims)
-        
-        # Apply structures to segmentation volume
-        for label_id, region_mask in structures.items():
-            segmentation[region_mask] = label_id
-        
-        logger.info(f"Generated segmentation volume: {dims} with {len(structures)} structures")
-        return segmentation
-    
-    def _generate_vista3d_structures(self, dims):
-        """Generate VISTA3D anatomical structures"""
-        x_size, y_size, z_size = dims
-        structures = {}
-        
-        def create_anatomical_region(center, radii, shape_type='ellipsoid'):
-            cx, cy, cz = center
-            rx, ry, rz = radii
-            
-            # Ensure center and radii are within volume bounds
-            cx = max(rx, min(x_size - rx, cx))
-            cy = max(ry, min(y_size - ry, cy))
-            cz = max(rz, min(z_size - rz, cz))
-            
-            # Create full volume coordinate grids
-            xx, yy, zz = np.meshgrid(np.arange(x_size), np.arange(y_size), np.arange(z_size), indexing='ij')
-            
-            if shape_type == 'ellipsoid':
-                # Ellipsoid equation
-                mask = ((xx - cx) / max(1, rx)) ** 2 + ((yy - cy) / max(1, ry)) ** 2 + ((zz - cz) / max(1, rz)) ** 2 <= 1
-            else:
-                # Box shape
-                mask = (np.abs(xx - cx) <= rx) & (np.abs(yy - cy) <= ry) & (np.abs(zz - cz) <= rz)
-            
-            return mask
-        
-        # Generate comprehensive anatomical structures based on VISTA3D label set
-        logger.info("Generating comprehensive VISTA3D anatomical structures...")
-        
-        # MAJOR ORGANS (adjusted for 128x128x64 dimensions)
-        # Liver (label 1) - large organ in upper right
-        structures[1] = create_anatomical_region([90, 70, 45], [25, 20, 15])
-        
-        # Kidneys (label 2, 13) - paired organs
-        structures[2] = create_anatomical_region([75, 45, 30], [8, 12, 12])   # Right kidney
-        structures[13] = create_anatomical_region([75, 83, 30], [8, 12, 12])  # Left kidney
-        
-        # Spleen (label 3) - left upper abdomen
-        structures[3] = create_anatomical_region([75, 85, 40], [8, 12, 15])
-        
-        # Pancreas (label 4) - central upper abdomen
-        structures[4] = create_anatomical_region([85, 65, 38], [6, 18, 8])
-        
-        # Cardiovascular
-        structures[5] = create_anatomical_region([85, 65, 50], [3, 3, 25])     # Aorta
-        structures[6] = create_anatomical_region([88, 65, 45], [2, 2, 20])     # IVC
-        structures[115] = create_anatomical_region([80, 70, 50], [18, 18, 25]) # Heart
-        
-        # Adrenal glands
-        structures[7] = create_anatomical_region([75, 50, 42], [4, 4, 6])      # Right adrenal
-        structures[8] = create_anatomical_region([75, 78, 42], [4, 4, 6])      # Left adrenal
-        
-        # Digestive system
-        structures[9] = create_anatomical_region([82, 75, 35], [3, 4, 5])      # Gallbladder
-        structures[10] = create_anatomical_region([85, 65, 52], [2, 2, 15])    # Esophagus
-        structures[11] = create_anatomical_region([75, 68, 42], [12, 15, 8])   # Stomach
-        structures[12] = create_anatomical_region([88, 65, 40], [4, 6, 3])     # Duodenum
-        structures[14] = create_anatomical_region([90, 55, 32], [8, 8, 12])    # Ascending colon
-        structures[15] = create_anatomical_region([85, 65, 30], [15, 6, 6])    # Transverse colon
-        structures[16] = create_anatomical_region([80, 75, 32], [8, 8, 12])    # Descending colon
-        structures[17] = create_anatomical_region([85, 65, 35], [10, 12, 8])   # Small intestine
-        structures[18] = create_anatomical_region([85, 65, 25], [6, 6, 8])     # Rectum
-        structures[19] = create_anatomical_region([85, 65, 28], [8, 8, 6])     # Bladder
-        
-        # Respiratory system
-        structures[20] = create_anatomical_region([70, 65, 52], [25, 20, 18])  # Left lung
-        structures[21] = create_anatomical_region([100, 65, 52], [25, 20, 18]) # Right lung
-        
-        # Neurological
-        structures[22] = create_anatomical_region([85, 65, 58], [25, 30, 20])  # Brain
-        structures[121] = create_anatomical_region([85, 65, 40], [4, 4, 25])   # Spinal cord
-        
-        # Cervical vertebrae (C1-C7)
-        for i, c_num in enumerate(range(23, 30)):
-            structures[c_num] = create_anatomical_region([85, 65, 55 - i*2], [3, 3, 2])
-        
-        # Thoracic vertebrae (T1-T12)
-        for i, t_num in enumerate(range(30, 42)):
-            structures[t_num] = create_anatomical_region([85, 65, 52 - i*2], [4, 4, 2])
-        
-        # Lumbar vertebrae (L1-L5)
-        for i, l_num in enumerate(range(42, 47)):
-            structures[l_num] = create_anatomical_region([85, 65, 38 - i*2], [5, 5, 3])
-        
-        # Ribs (first few pairs)
-        for i in range(4):  # Ribs 1-4 left and right
-            left_rib = 47 + i*2
-            right_rib = 48 + i*2
-            rib_z = 52 - i*3
-            structures[left_rib] = create_anatomical_region([70, 65, rib_z], [15, 2, 1])   # Left rib
-            structures[right_rib] = create_anatomical_region([100, 65, rib_z], [15, 2, 1]) # Right rib
-        
-        # Endocrine
-        structures[122] = create_anatomical_region([85, 65, 56], [3, 4, 2])    # Thyroid
-        
-        # Reproductive (conditionally present)
-        if np.random.random() > 0.5:  # Simulate male/female anatomy
-            structures[123] = create_anatomical_region([85, 65, 22], [4, 4, 3])  # Prostate
-        else:
-            structures[124] = create_anatomical_region([85, 65, 30], [6, 8, 4])  # Uterus
-        
-        # Generate additional smaller structures to reach 100+ total
-        additional_structures = [
-            (55, [75, 55, 45], [3, 3, 4]),   # Additional organ 1
-            (56, [95, 55, 45], [3, 3, 4]),   # Additional organ 2
-            (57, [85, 55, 48], [2, 2, 3]),   # Additional organ 3
-            (58, [85, 75, 48], [2, 2, 3]),   # Additional organ 4
-            (59, [78, 62, 40], [2, 2, 3]),   # Additional organ 5
-            (60, [92, 62, 40], [2, 2, 3]),   # Additional organ 6
-        ]
-        
-        for label_id, center, radii in additional_structures:
-            if label_id in VISTA3D_LABELS:
-                structures[label_id] = create_anatomical_region(center, radii)
-        
-        logger.info(f"Generated {len(structures)} anatomical structures (VISTA3D comprehensive set)")
-        return structures
-    
-    def _generate_realistic_anatomy_volume(self) -> np.ndarray:
-        """Fallback method to generate realistic anatomy"""
-        dims = [128, 128, 64]  # Reduced dimensions
-        segmentation = np.zeros(dims, dtype=np.uint8)
-        structures = self._generate_vista3d_structures(dims)
-        
-        for label_id, region_mask in structures.items():
-            segmentation[region_mask] = label_id
-        
-        return segmentation
+
     
     def _extract_detected_labels(self, segmentation: np.ndarray, confidence_threshold: float) -> List[Dict]:
         """Extract detected anatomical structures from segmentation"""
@@ -477,10 +520,11 @@ class Vista3DServer:
             voxel_count = np.sum(segmentation == label_id)
             volume = float(voxel_count)
             
-            # Simulate confidence based on volume and structure type
+            # Calculate confidence based on volume and structure type
             # Larger, well-defined structures get higher confidence
+            # This would normally come from the VISTA3D model output
             base_confidence = 0.75 + (min(voxel_count, 50000) / 100000) * 0.2
-            confidence = min(0.98, base_confidence + np.random.normal(0, 0.05))
+            confidence = min(0.98, base_confidence)
             
             if confidence >= confidence_threshold and volume > 500:  # Minimum volume threshold
                 label_info = VISTA3D_LABELS.get(int(label_id), {
@@ -506,18 +550,33 @@ class Vista3DServer:
         logger.info(f"Starting VISTA3D analysis for image: {request.imageId}")
         
         try:
-            if self.vista3d_available:
-                # Real VISTA3D analysis
-                segmentation, labels = await self._run_real_vista3d(request)
-            else:
-                # Mock analysis for development
-                segmentation, labels = await self._run_mock_vista3d(request)
+            # Real VISTA3D analysis only
+            segmentation, labels, original_nifti_path = await self._run_real_vista3d(request)
             
             # 🔧 DEBUG: Save raw segmentation data for debugging
-            save_debug_segmentation(segmentation, labels, request.imageId)
+            save_debug_segmentation(segmentation, labels, request.imageId, original_nifti_path)
+            
+            # 🔧 DEBUG: Save both conversion approaches for comparison
+            try:
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                debug_dir = Path("debug_outputs")
+                debug_dir.mkdir(exist_ok=True)
+                
+                # Save the labelmap data that will be sent to frontend
+                if labelmap_data is not None:
+                    with open(debug_dir / f"vtk_labelmap_{request.imageId}_{timestamp}.json", 'w') as f:
+                        if isinstance(labelmap_data, str):
+                            f.write(labelmap_data)
+                        else:
+                            # For VTK.js format, we need special handling for binary data
+                            import json
+                            json.dump(labelmap_data, f, indent=2, default=str)
+                    print(f"🔧 DEBUG: Saved VTK labelmap data to debug_outputs/vtk_labelmap_{request.imageId}_{timestamp}.json")
+            except Exception as debug_error:
+                logger.warning(f"⚠️ Debug labelmap save failed: {debug_error}")
             
             # Convert segmentation to VTK labelmap format
-            labelmap_data = self._convert_to_vtk_labelmap(segmentation)
+            labelmap_data = self._convert_to_vtk_labelmap(segmentation, original_nifti_path)
             
             processing_time = time.time() - start_time
             
@@ -546,125 +605,102 @@ class Vista3DServer:
                 logger.info("Downloading VISTA3D bundle...")
                 self._download_vista3d_bundle()
             
-            # For now, create a realistic mock volume that simulates VISTA3D output
-            # In full production, this would load actual medical image data
-            # and run the VISTA3D inference
-            segmentation = self._run_vista3d_inference(request)
+            # Run actual VISTA3D inference
+            segmentation, original_nifti_path = self._run_vista3d_inference(request)
             
             # Extract detected labels from segmentation
             labels = self._extract_detected_labels(segmentation, request.confidenceThreshold)
             
             logger.info(f"VISTA3D analysis completed: {len(labels)} structures detected")
-            return segmentation, labels
+            return segmentation, labels, original_nifti_path
             
         except Exception as e:
             logger.error(f"VISTA3D analysis failed: {e}")
-            # Fall back to enhanced mock if real analysis fails
-            logger.info("Falling back to enhanced mock analysis")
-            return await self._run_mock_vista3d(request)
+            raise
     
-    async def _run_mock_vista3d(self, request: Vista3DRequest):
-        """Generate enhanced mock segmentation with realistic structure"""
-        logger.info("Generating enhanced mock VISTA3D segmentation...")
-        
-        # Create realistic 3D segmentation volume
-        # Simulate typical CT volume dimensions
-        dims = [256, 256, 128]  # Typical CT dimensions
-        segmentation = np.zeros(dims, dtype=np.uint8)
-        
-        # Generate realistic anatomical structures
-        # These would be replaced by actual VISTA3D output
-        structures = self._generate_realistic_anatomy(dims)
-        
-        # Apply structures to segmentation volume
-        for label_id, (name, region) in structures.items():
-            segmentation[region] = label_id
-        
-        # Extract detected labels with confidence scores
-        labels = []
-        unique_labels = np.unique(segmentation)
-        
-        for label_id in unique_labels:
-            if label_id == 0:  # Skip background
-                continue
-                
-            voxel_count = np.sum(segmentation == label_id)
-            volume = float(voxel_count)  # Volume in voxels
-            
-            # Mock realistic confidence based on structure
-            confidence = np.random.uniform(0.8, 0.95)
-            
-            if confidence >= request.confidenceThreshold and volume > 100:
-                label_info = VISTA3D_LABELS.get(int(label_id), {"name": f"structure_{label_id}", "category": "unknown"})
-                
-                labels.append({
-                    "id": int(label_id),
-                    "name": label_info["name"],
-                    "confidence": confidence,
-                    "volume": volume
-                })
-        
-        logger.info(f"Mock analysis generated {len(labels)} structures")
-        return segmentation, labels
+
     
-    def _generate_realistic_anatomy(self, dims):
-        """Generate realistic anatomical structure regions"""
-        x_size, y_size, z_size = dims
-        structures = {}
-        
-        # Generate ellipsoidal/spherical regions for organs
-        def create_ellipsoid(center, radii):
-            cx, cy, cz = center
-            rx, ry, rz = radii
-            
-            # Create meshgrid
-            x = np.arange(max(0, cx - rx - 5), min(x_size, cx + rx + 5))
-            y = np.arange(max(0, cy - ry - 5), min(y_size, cy + ry + 5))
-            z = np.arange(max(0, cz - rz - 5), min(z_size, cz + rz + 5))
-            
-            xx, yy, zz = np.meshgrid(x, y, z, indexing='ij')
-            
-            # Ellipsoid equation
-            mask = ((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2 + ((zz - cz) / rz) ** 2 <= 1
-            
-            return (xx[mask], yy[mask], zz[mask])
-        
-        # Liver (large organ, right side)
-        structures[1] = ("liver", create_ellipsoid([180, 130, 70], [40, 35, 25]))
-        
-        # Kidneys (paired organs)
-        structures[2] = ("kidney", create_ellipsoid([120, 80, 60], [15, 20, 25]))
-        
-        # Spleen (left side)
-        structures[3] = ("spleen", create_ellipsoid([80, 120, 65], [12, 18, 20]))
-        
-        # Heart (central, slightly left)
-        structures[115] = ("heart", create_ellipsoid([110, 140, 80], [25, 20, 30]))
-        
-        # Lungs (large, bilateral)
-        structures[20] = ("lung", create_ellipsoid([128, 128, 90], [50, 60, 40]))
-        
-        # Brain (upper region)
-        structures[22] = ("brain", create_ellipsoid([128, 128, 110], [35, 40, 25]))
-        
-        return structures
-    
-    def _convert_to_vtk_labelmap(self, segmentation: np.ndarray) -> str:
-        """Convert numpy segmentation to VTK labelmap format"""
+    def _convert_to_vtk_labelmap(self, segmentation: np.ndarray, original_nifti_path: str = None):
+        """Convert numpy segmentation to VTK labelmap format using VolView transformers"""
         try:
-            # For now, return base64 encoded numpy array
-            # In full implementation, this would create actual VTK format
+            # 🔧 DEBUG: Add detailed logging about segmentation data
+            logger.info(f"Converting segmentation to VTK format:")
+            logger.info(f"  Original shape: {segmentation.shape}")
+            logger.info(f"  Original dtype: {segmentation.dtype}")
+            logger.info(f"  Value range: [{segmentation.min()}, {segmentation.max()}]")
+            logger.info(f"  Unique values: {len(np.unique(segmentation))} labels")
+            
+            # 🆕 APPROACH: Use VolView transformers to properly convert ITK/NIfTI to VTK.js format
+            if VOLVIEW_TRANSFORMERS_AVAILABLE and original_nifti_path and Path(original_nifti_path).exists():
+                try:
+                    logger.info("🔄 Using VolView transformers for proper ITK→VTK.js conversion...")
+                    
+                    # Load the original MONAI result as ITK image
+                    import itk
+                    itk_image = itk.imread(original_nifti_path)
+                    logger.info(f"  ITK image loaded: {itk_image.GetLargestPossibleRegion().GetSize()}")
+                    
+                    # Convert ITK image to VTK.js format using VolView transformers
+                    from volview_server.transformers import convert_itk_to_vtkjs_image
+                    vtkjs_result = convert_itk_to_vtkjs_image(itk_image)
+                    
+                    logger.info("✅ Successfully converted using VolView transformers")
+                    
+                    # 🔧 PROPER VTK.js SERIALIZATION: Following ChatGPT's advice
+                    # Handle VTK.js binary data with proper base64+gzip encoding
+                    if isinstance(vtkjs_result, dict):
+                        try:
+                            encoded_result = self._encode_vtkjs_inplace_gz(vtkjs_result)
+                            logger.info("✅ VTK.js binary data encoded with base64+gzip")
+                            return json.dumps(encoded_result)
+                        except Exception as encoding_error:
+                            logger.error(f"❌ VTK.js encoding failed: {encoding_error}")
+                            logger.info("Falling back to simple base64 encoding...")
+                            
+                            # Simple fallback encoding
+                            if (vtkjs_result.get('pointData') and 
+                                vtkjs_result['pointData'].get('arrays') and 
+                                len(vtkjs_result['pointData']['arrays']) > 0):
+                                
+                                array_data = vtkjs_result['pointData']['arrays'][0]
+                                if 'values' in array_data:
+                                    import base64
+                                    values_bytes = np.array(array_data['values'], dtype=np.uint8).tobytes()
+                                    array_data['values'] = base64.b64encode(values_bytes).decode('ascii')
+                                    array_data['_encoded'] = True
+                            
+                            return json.dumps(vtkjs_result)
+                    else:
+                        logger.warning("VTK.js result is not a dict, using fallback")
+                        return None
+                    
+                except Exception as transformer_error:
+                    logger.warning(f"⚠️ VolView transformer failed: {transformer_error}")
+                    logger.info("Falling back to direct numpy conversion...")
+            else:
+                logger.info("VolView transformers not available or no original file, using direct conversion...")
+            
+            # FALLBACK: Direct numpy array conversion with axis handling
             import base64
             
+            # Option 1: Use as-is (MONAI typically outputs in correct ITK orientation)
+            segmentation_vtk = np.ascontiguousarray(segmentation)
+            
+            logger.info(f"  VTK shape: {segmentation_vtk.shape}")
+            logger.info(f"  VTK memory layout: {'C' if segmentation_vtk.flags['C_CONTIGUOUS'] else 'F'}-contiguous")
+            
             # Convert to bytes and encode
-            segmentation_bytes = segmentation.tobytes()
+            segmentation_bytes = segmentation_vtk.tobytes()
             encoded_data = base64.b64encode(segmentation_bytes).decode('utf-8')
             
             # Include metadata for reconstruction
             metadata = {
                 'data': encoded_data,
-                'shape': segmentation.shape,
-                'dtype': str(segmentation.dtype)
+                'shape': segmentation_vtk.shape,  # Use VTK shape
+                'dtype': str(segmentation_vtk.dtype),
+                'original_shape': segmentation.shape,  # Keep original for reference
+                'memory_layout': 'C_CONTIGUOUS',
+                'conversion_method': 'direct_numpy'
             }
             
             return json.dumps(metadata)
@@ -672,9 +708,97 @@ class Vista3DServer:
         except Exception as e:
             logger.error(f"Failed to convert segmentation to VTK format: {e}")
             return None
+    
+    def _np_dtype_to_typedarray(self, dtype) -> str:
+        """Map numpy dtype to JS TypedArray name expected by vtk.js"""
+        import numpy as np
+        mapping = {
+            np.dtype('uint8'):  'Uint8Array',
+            np.dtype('int8'):   'Int8Array', 
+            np.dtype('uint16'): 'Uint16Array',
+            np.dtype('int16'):  'Int16Array',
+            np.dtype('uint32'): 'Uint32Array',
+            np.dtype('int32'):  'Int32Array',
+            np.dtype('float32'):'Float32Array',
+            np.dtype('float64'):'Float64Array',
+        }
+        return mapping.get(dtype, 'Uint8Array')
+    
+    def _gzip_b64(self, data: bytes) -> str:
+        """Compress data with gzip and encode as base64"""
+        import gzip
+        import base64
+        return base64.b64encode(gzip.compress(data)).decode('ascii')
+    
+    def _encode_array_gz(self, values) -> dict:
+        """Encode numpy array or bytes with gzip+base64 for VTK.js"""
+        import numpy as np
+        
+        if isinstance(values, np.ndarray):
+            arr = np.ascontiguousarray(values)
+            gz_b64 = self._gzip_b64(arr.tobytes())
+            return {
+                "values": gz_b64,
+                "valuesEncoding": "base64",
+                "valuesCompression": "gzip",
+                "dtype": self._np_dtype_to_typedarray(arr.dtype),
+                "numberOfComponents": int(arr.shape[-1]) if arr.ndim > 1 else 1,
+                "size": int(arr.size),
+                "byteLength": int(arr.nbytes)
+            }
+        elif isinstance(values, (bytes, bytearray, memoryview)):
+            gz_b64 = self._gzip_b64(bytes(values))
+            return {
+                "values": gz_b64,
+                "valuesEncoding": "base64", 
+                "valuesCompression": "gzip",
+                "dtype": "Uint8Array",
+                "numberOfComponents": 1,
+                "size": len(values),
+                "byteLength": len(values)
+            }
+        return None
+    
+    def _encode_vtkjs_inplace_gz(self, ds: dict) -> dict:
+        """
+        Walk VTK.js dataset and gzip+base64 encode all binary arrays.
+        Following ChatGPT's recommended approach.
+        """
+        def fix_values(container: dict, key: str):
+            if key in container and isinstance(container[key], dict) and "values" in container[key]:
+                values = container[key]["values"]
+                encoded = self._encode_array_gz(values)
+                if encoded:
+                    container[key].update(encoded)
+        
+        def fix_arrays(section: str):
+            sect = ds.get(section)
+            if isinstance(sect, dict) and isinstance(sect.get("arrays"), list):
+                for arr in sect["arrays"]:
+                    values = arr.get("values")
+                    encoded = self._encode_array_gz(values)
+                    if encoded:
+                        arr.update(encoded)
+        
+        # Handle pointData and cellData arrays
+        for section in ("pointData", "cellData"):
+            fix_arrays(section)
+        
+        # Handle geometry arrays
+        for geom in ("points", "verts", "lines", "polys", "strips"):
+            fix_values(ds, geom)
+        
+        # Mark the encoding method
+        ds.setdefault("encoding", {})["binaryArrays"] = "base64+gzip"
+        
+        return ds
 
 # FastAPI application
 app = FastAPI(title="VISTA3D Server for VolView", version="1.0.0")
+
+# 🚀 Enable gzip compression for all responses (ChatGPT recommendation)
+from fastapi.middleware.gzip import GZipMiddleware
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 # Enable CORS for VolView frontend
 app.add_middleware(
@@ -708,5 +832,5 @@ async def get_labels():
     return {"labels": VISTA3D_LABELS}
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8082))
+    port = int(os.environ.get("PORT", 8081))
     uvicorn.run(app, host="0.0.0.0", port=port)
