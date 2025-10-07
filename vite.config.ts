@@ -219,7 +219,7 @@ export default defineConfig({
       '/tmp': config.baseUrl!,
     },
     watch: {
-      ignored: ['**/venv/**', '**/server/venv/**', '**/server/bundles/**'],
+      ignored: ['**/venv/**', '**/server/venv/**', '**/server/.venv/**', '**/server/bundles/**'],
     },
   },
   optimizeDeps: {
