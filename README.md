@@ -11,7 +11,7 @@
 # Install dependencies
 npm install
 
-# Start development server (http://localhost:5173)
+# Start development server (http://localhost:8082)
 npm run dev
 ```
 
