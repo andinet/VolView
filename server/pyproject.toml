@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "volview-server"
-version = "0.1.0"
-description = "VolView VISTA3D Server with MONAI Integration"
+version = "0.2.0"
+description = "VolView Server with VISTA3D and MAISI MONAI Integration"
 authors = ["VolView Team <volview@kitware.com>"]
 license = "Apache-2.0"
 readme = "README.md"
@@ -24,7 +24,7 @@ python-socketio = "^5.8.0"
 charset-normalizer = "^3.1.0"
 
 # MONAI & Machine Learning
-monai = {extras = ["all"], version = "^1.3.0"}
+monai = {extras = ["all"], version = "^1.4.0"}
 torch = "^2.8.0"
 torchvision = "^0.23.0"
 

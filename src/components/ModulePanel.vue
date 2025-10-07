@@ -47,6 +47,7 @@ import DataBrowser from './DataBrowser.vue';
 import RenderingModule from './RenderingModule.vue';
 import AnnotationsModule from './AnnotationsModule.vue';
 import AnalysisModule from './AnalysisModule.vue';
+import ClaraGenerateModule from './ClaraGenerateModule.vue';
 import ServerModule from './ServerModule.vue';
 import ProbeView from './ProbeView.vue';
 import { useToolStore } from '../store/tools';
@@ -74,6 +75,11 @@ const Modules: Module[] = [
     name: 'Analysis',
     icon: 'brain',
     component: AnalysisModule,
+  },
+  {
+    name: 'Clara Generate',
+    icon: 'creation',
+    component: ClaraGenerateModule,
   },
   {
     name: 'Rendering',
