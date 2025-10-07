@@ -327,23 +327,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
-# MONAI imports
-try:
-    from monai.bundle import ConfigWorkflow
-    MONAI_AVAILABLE = True
-    print("✅ MONAI successfully loaded!")
-except ImportError as e:
-    print(f"Warning: MONAI not available - {e}")
-    print("Using fallback implementation.")
-    MONAI_AVAILABLE = False
-    ConfigWorkflow = None
-except Exception as e:
-    print(f"Warning: MONAI import error - {e}")
-    print("Using fallback implementation.")
-    MONAI_AVAILABLE = False
-    ConfigWorkflow = None
-
-# MONAI imports
+# MONAI imports - Required, no fallbacks
 try:
     import monai
     from monai.bundle import ConfigWorkflow
@@ -351,9 +335,12 @@ try:
     import nibabel as nib
     import torch
     MONAI_AVAILABLE = True
+    print("✅ MONAI successfully loaded!")
 except ImportError as e:
-    print(f"Warning: MONAI not available: {e}")
-    MONAI_AVAILABLE = False
+    print(f"❌ FATAL ERROR: MONAI not available - {e}")
+    print("VISTA3D server cannot run without MONAI. Please install MONAI:")
+    print("  poetry install")
+    sys.exit(1)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -376,50 +363,37 @@ class Vista3DServer:
         self.bundle_root = Path(__file__).parent / "bundles"
         self.temp_dir = Path(tempfile.mkdtemp(prefix="vista3d_"))
         
-        # Initialize VISTA3D bundle if available
-        self.vista3d_available = self._initialize_vista3d()
+        # Initialize VISTA3D bundle - fail if not available
+        self._initialize_vista3d()
         
-    def _initialize_vista3d(self) -> bool:
-        """Initialize VISTA3D bundle"""
-        if not MONAI_AVAILABLE:
-            logger.error("MONAI not available - VISTA3D cannot run")
-            return False
-            
-        try:
-            # Check if VISTA3D bundle exists
-            bundle_path = self.bundle_root / "vista3d"
-            if not bundle_path.exists():
-                logger.info("Downloading VISTA3D bundle...")
-                self._download_vista3d_bundle()
-            
-            # Load VISTA3D configuration
-            config_path = bundle_path / "configs" / "inference.json"
-            if config_path.exists():
-                logger.info("VISTA3D bundle ready")
-                return True
-            else:
-                logger.error("VISTA3D config not found - bundle incomplete")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Failed to initialize VISTA3D: {e}")
-            return False
+    def _initialize_vista3d(self):
+        """Initialize VISTA3D bundle - fail fast if not available"""
+        # MONAI is already checked at import time, so we know it's available here
+        
+        # Check if VISTA3D bundle exists
+        bundle_path = self.bundle_root / "vista3d"
+        if not bundle_path.exists():
+            logger.info("Downloading VISTA3D bundle...")
+            self._download_vista3d_bundle()
+        
+        # Load VISTA3D configuration
+        config_path = bundle_path / "configs" / "inference.json"
+        if not config_path.exists():
+            raise RuntimeError("VISTA3D config not found - bundle incomplete. Please re-download.")
+        
+        logger.info("✅ VISTA3D bundle ready")
     
     def _download_vista3d_bundle(self):
         """Download VISTA3D bundle using MONAI"""
-        try:
-            import subprocess
-            cmd = [
-                sys.executable, "-m", "monai.bundle", "download", "vista3d",
-                "--bundle_dir", str(self.bundle_root)
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode != 0:
-                raise RuntimeError(f"Bundle download failed: {result.stderr}")
-            logger.info("VISTA3D bundle downloaded successfully")
-        except Exception as e:
-            logger.error(f"Failed to download VISTA3D bundle: {e}")
-            raise
+        import subprocess
+        cmd = [
+            sys.executable, "-m", "monai.bundle", "download", "vista3d",
+            "--bundle_dir", str(self.bundle_root)
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(f"Bundle download failed: {result.stderr}")
+        logger.info("✅ VISTA3D bundle downloaded successfully")
     
     def _run_vista3d_inference(self, request: Vista3DRequest) -> np.ndarray:
         """Run VISTA3D inference using MONAI bundle"""
@@ -827,43 +801,17 @@ class Vista3DServer:
                             find_bytes_objects(vtkjs_result)
                             raise encoding_error
                     else:
-                        logger.warning("VTK.js result is not a dict, using fallback")
-                        return None
+                        raise ValueError("VTK.js transformer returned invalid result (not a dict)")
                     
                 except Exception as transformer_error:
-                    logger.warning(f"⚠️ VolView transformer failed: {transformer_error}")
-                    logger.info("Falling back to direct numpy conversion...")
+                    logger.error(f"❌ VolView transformer failed: {transformer_error}")
+                    raise
             else:
-                logger.info("VolView transformers not available or no original file, using direct conversion...")
-            
-            # FALLBACK: Direct numpy array conversion with axis handling
-            import base64
-            
-            # Option 1: Use as-is (MONAI typically outputs in correct ITK orientation)
-            segmentation_vtk = np.ascontiguousarray(segmentation)
-            
-            logger.info(f"  VTK shape: {segmentation_vtk.shape}")
-            logger.info(f"  VTK memory layout: {'C' if segmentation_vtk.flags['C_CONTIGUOUS'] else 'F'}-contiguous")
-            
-            # Convert to bytes and encode
-            segmentation_bytes = segmentation_vtk.tobytes()
-            encoded_data = base64.b64encode(segmentation_bytes).decode('utf-8')
-            
-            # Include metadata for reconstruction
-            metadata = {
-                'data': encoded_data,
-                'shape': segmentation_vtk.shape,  # Use VTK shape
-                'dtype': str(segmentation_vtk.dtype),
-                'original_shape': segmentation.shape,  # Keep original for reference
-                'memory_layout': 'C_CONTIGUOUS',
-                'conversion_method': 'direct_numpy'
-            }
-            
-            return json.dumps(metadata)
+                raise RuntimeError("VolView transformers not available or no original NIfTI file. Cannot convert segmentation.")
             
         except Exception as e:
             logger.error(f"Failed to convert segmentation to VTK format: {e}")
-            return None
+            raise
     
     def _np_dtype_to_typedarray(self, dtype) -> str:
         """Map numpy dtype to JS TypedArray name expected by vtk.js"""
