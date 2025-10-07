@@ -23,6 +23,8 @@ yarn-error.log*
 
 __pycache__
 venv
+.venv
+server/.venv
 
 # VISTA3D debug outputs (raw segmentation data)
 server/debug_outputs/
