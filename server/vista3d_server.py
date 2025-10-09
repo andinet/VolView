@@ -264,61 +264,139 @@ def save_debug_segmentation(segmentation_array: np.ndarray, labels: List[Dict], 
 
 # VISTA3D anatomical structure labels (subset of 130+ structures)
 VISTA3D_LABELS = {
+    0: {"name": "background", "category": "other"},
     1: {"name": "liver", "category": "abdominal_organs"},
-    2: {"name": "kidney_right", "category": "abdominal_organs"},
+    2: {"name": "kidney_unspecified", "category": "abdominal_organs"},
     3: {"name": "spleen", "category": "abdominal_organs"},
     4: {"name": "pancreas", "category": "abdominal_organs"},
-    5: {"name": "aorta", "category": "cardiovascular"},
-    6: {"name": "inferior_vena_cava", "category": "cardiovascular"},
-    7: {"name": "right_adrenal_gland", "category": "endocrine"},
-    8: {"name": "left_adrenal_gland", "category": "endocrine"},
-    9: {"name": "gallbladder", "category": "abdominal_organs"},
-    10: {"name": "esophagus", "category": "digestive"},
-    11: {"name": "stomach", "category": "digestive"},
-    12: {"name": "duodenum", "category": "digestive"},
-    13: {"name": "kidney_left", "category": "abdominal_organs"},
-    14: {"name": "colon_ascending", "category": "digestive"},
-    15: {"name": "colon_transverse", "category": "digestive"},
-    16: {"name": "colon_descending", "category": "digestive"},
-    17: {"name": "small_intestine", "category": "digestive"},
+    5: {"name": "kidney_right", "category": "abdominal_organs"},
+    6: {"name": "aorta", "category": "cardiovascular"},
+    7: {"name": "inferior_vena_cava", "category": "cardiovascular"},
+    8: {"name": "adrenal_right", "category": "endocrine"},
+    9: {"name": "adrenal_left", "category": "endocrine"},
+    10: {"name": "gallbladder", "category": "abdominal_organs"},
+    11: {"name": "esophagus", "category": "digestive"},
+    12: {"name": "stomach", "category": "digestive"},
+    13: {"name": "duodenum", "category": "digestive"},
+    14: {"name": "kidney_left", "category": "abdominal_organs"},
+    15: {"name": "urinary_bladder", "category": "urological"},
+    16: {"name": "prostate_or_uterus", "category": "reproductive"},
+    17: {"name": "portal_and_splenic_vein", "category": "cardiovascular"},
     18: {"name": "rectum", "category": "digestive"},
-    19: {"name": "urinary_bladder", "category": "urological"},
-    20: {"name": "lung_left", "category": "respiratory"},
-    21: {"name": "lung_right", "category": "respiratory"},
+    19: {"name": "small_bowel", "category": "digestive"},
+    20: {"name": "lung_unspecified", "category": "respiratory"},
+    21: {"name": "bone_unspecified", "category": "skeletal"},
     22: {"name": "brain", "category": "neurological"},
-    23: {"name": "vertebrae_C1", "category": "skeletal"},
-    24: {"name": "vertebrae_C2", "category": "skeletal"},
-    25: {"name": "vertebrae_C3", "category": "skeletal"},
-    26: {"name": "vertebrae_C4", "category": "skeletal"},
-    27: {"name": "vertebrae_C5", "category": "skeletal"},
-    28: {"name": "vertebrae_C6", "category": "skeletal"},
-    29: {"name": "vertebrae_C7", "category": "skeletal"},
-    30: {"name": "vertebrae_T1", "category": "skeletal"},
-    31: {"name": "vertebrae_T2", "category": "skeletal"},
-    32: {"name": "vertebrae_T3", "category": "skeletal"},
-    33: {"name": "vertebrae_T4", "category": "skeletal"},
-    34: {"name": "vertebrae_T5", "category": "skeletal"},
-    35: {"name": "vertebrae_T6", "category": "skeletal"},
-    36: {"name": "vertebrae_T7", "category": "skeletal"},
-    37: {"name": "vertebrae_T8", "category": "skeletal"},
-    38: {"name": "vertebrae_T9", "category": "skeletal"},
-    39: {"name": "vertebrae_T10", "category": "skeletal"},
-    40: {"name": "vertebrae_T11", "category": "skeletal"},
-    41: {"name": "vertebrae_T12", "category": "skeletal"},
-    42: {"name": "vertebrae_L1", "category": "skeletal"},
-    43: {"name": "vertebrae_L2", "category": "skeletal"},
-    44: {"name": "vertebrae_L3", "category": "skeletal"},
-    45: {"name": "vertebrae_L4", "category": "skeletal"},
-    46: {"name": "vertebrae_L5", "category": "skeletal"},
-    47: {"name": "rib_1_left", "category": "skeletal"},
-    48: {"name": "rib_1_right", "category": "skeletal"},
-    49: {"name": "rib_2_left", "category": "skeletal"},
-    50: {"name": "rib_2_right", "category": "skeletal"},
+    23: {"name": "lung_tumor", "category": "oncology"},
+    24: {"name": "pancreatic_tumor", "category": "oncology"},
+    25: {"name": "hepatic_vessel", "category": "cardiovascular"},
+    26: {"name": "hepatic_tumor", "category": "oncology"},
+    27: {"name": "colon_cancer_primaries", "category": "oncology"},
+    28: {"name": "lung_left_upper_lobe", "category": "respiratory"},
+    29: {"name": "lung_left_lower_lobe", "category": "respiratory"},
+    30: {"name": "lung_right_upper_lobe", "category": "respiratory"},
+    31: {"name": "lung_right_middle_lobe", "category": "respiratory"},
+    32: {"name": "lung_right_lower_lobe", "category": "respiratory"},
+    33: {"name": "vertebrae_L5", "category": "skeletal"},
+    34: {"name": "vertebrae_L4", "category": "skeletal"},
+    35: {"name": "vertebrae_L3", "category": "skeletal"},
+    36: {"name": "vertebrae_L2", "category": "skeletal"},
+    37: {"name": "vertebrae_L1", "category": "skeletal"},
+    38: {"name": "vertebrae_T12", "category": "skeletal"},
+    39: {"name": "vertebrae_T11", "category": "skeletal"},
+    40: {"name": "vertebrae_T10", "category": "skeletal"},
+    41: {"name": "vertebrae_T9", "category": "skeletal"},
+    42: {"name": "vertebrae_T8", "category": "skeletal"},
+    43: {"name": "vertebrae_T7", "category": "skeletal"},
+    44: {"name": "vertebrae_T6", "category": "skeletal"},
+    45: {"name": "vertebrae_T5", "category": "skeletal"},
+    46: {"name": "vertebrae_T4", "category": "skeletal"},
+    47: {"name": "vertebrae_T3", "category": "skeletal"},
+    48: {"name": "vertebrae_T2", "category": "skeletal"},
+    49: {"name": "vertebrae_T1", "category": "skeletal"},
+    50: {"name": "vertebrae_C7", "category": "skeletal"},
+    51: {"name": "vertebrae_C6", "category": "skeletal"},
+    52: {"name": "vertebrae_C5", "category": "skeletal"},
+    53: {"name": "vertebrae_C4", "category": "skeletal"},
+    54: {"name": "vertebrae_C3", "category": "skeletal"},
+    55: {"name": "vertebrae_C2", "category": "skeletal"},
+    56: {"name": "vertebrae_C1", "category": "skeletal"},
+    57: {"name": "trachea", "category": "respiratory"},
+    58: {"name": "iliac_artery_left", "category": "cardiovascular"},
+    59: {"name": "iliac_artery_right", "category": "cardiovascular"},
+    60: {"name": "iliac_vein_left", "category": "cardiovascular"},
+    61: {"name": "iliac_vein_right", "category": "cardiovascular"},
+    62: {"name": "colon", "category": "digestive"},
+    63: {"name": "rib_1_left", "category": "skeletal"},
+    64: {"name": "rib_2_left", "category": "skeletal"},
+    65: {"name": "rib_3_left", "category": "skeletal"},
+    66: {"name": "rib_4_left", "category": "skeletal"},
+    67: {"name": "rib_5_left", "category": "skeletal"},
+    68: {"name": "rib_6_left", "category": "skeletal"},
+    69: {"name": "rib_7_left", "category": "skeletal"},
+    70: {"name": "rib_8_left", "category": "skeletal"},
+    71: {"name": "rib_9_left", "category": "skeletal"},
+    72: {"name": "rib_10_left", "category": "skeletal"},
+    73: {"name": "rib_11_left", "category": "skeletal"},
+    74: {"name": "rib_12_left", "category": "skeletal"},
+    75: {"name": "rib_1_right", "category": "skeletal"},
+    76: {"name": "rib_2_right", "category": "skeletal"},
+    77: {"name": "rib_3_right", "category": "skeletal"},
+    78: {"name": "rib_4_right", "category": "skeletal"},
+    79: {"name": "rib_5_right", "category": "skeletal"},
+    80: {"name": "rib_6_right", "category": "skeletal"},
+    81: {"name": "rib_7_right", "category": "skeletal"},
+    82: {"name": "rib_8_right", "category": "skeletal"},
+    83: {"name": "rib_9_right", "category": "skeletal"},
+    84: {"name": "rib_10_right", "category": "skeletal"},
+    85: {"name": "rib_11_right", "category": "skeletal"},
+    86: {"name": "rib_12_right", "category": "skeletal"},
+    87: {"name": "humerus_left", "category": "skeletal"},
+    88: {"name": "humerus_right", "category": "skeletal"},
+    89: {"name": "scapula_left", "category": "skeletal"},
+    90: {"name": "scapula_right", "category": "skeletal"},
+    91: {"name": "clavicula_left", "category": "skeletal"},
+    92: {"name": "clavicula_right", "category": "skeletal"},
+    93: {"name": "femur_left", "category": "skeletal"},
+    94: {"name": "femur_right", "category": "skeletal"},
+    95: {"name": "hip_left", "category": "skeletal"},
+    96: {"name": "hip_right", "category": "skeletal"},
+    97: {"name": "sacrum", "category": "skeletal"},
+    98: {"name": "gluteus_maximus_left", "category": "muscular"},
+    99: {"name": "gluteus_maximus_right", "category": "muscular"},
+    100: {"name": "gluteus_medius_left", "category": "muscular"},
+    101: {"name": "gluteus_medius_right", "category": "muscular"},
+    102: {"name": "gluteus_minimus_left", "category": "muscular"},
+    103: {"name": "gluteus_minimus_right", "category": "muscular"},
+    104: {"name": "autochthon_left", "category": "muscular"},
+    105: {"name": "autochthon_right", "category": "muscular"},
+    106: {"name": "iliopsoas_left", "category": "muscular"},
+    107: {"name": "iliopsoas_right", "category": "muscular"},
+    108: {"name": "atrial_appendage_left", "category": "cardiovascular"},
+    109: {"name": "brachiocephalic_trunk", "category": "cardiovascular"},
+    110: {"name": "brachiocephalic_vein_left", "category": "cardiovascular"},
+    111: {"name": "brachiocephalic_vein_right", "category": "cardiovascular"},
+    112: {"name": "common_carotid_artery_left", "category": "cardiovascular"},
+    113: {"name": "common_carotid_artery_right", "category": "cardiovascular"},
+    114: {"name": "costal_cartilages", "category": "skeletal"},
     115: {"name": "heart", "category": "cardiovascular"},
+    116: {"name": "kidney_cyst_left", "category": "oncology"},
+    117: {"name": "kidney_cyst_right", "category": "oncology"},
+    118: {"name": "prostate", "category": "reproductive"},
+    119: {"name": "pulmonary_vein", "category": "cardiovascular"},
+    120: {"name": "skull", "category": "skeletal"},
     121: {"name": "spinal_cord", "category": "neurological"},
-    122: {"name": "thyroid", "category": "endocrine"},
-    123: {"name": "prostate", "category": "reproductive"},
-    124: {"name": "uterus", "category": "reproductive"},
+    122: {"name": "sternum", "category": "skeletal"},
+    123: {"name": "subclavian_artery_left", "category": "cardiovascular"},
+    124: {"name": "subclavian_artery_right", "category": "cardiovascular"},
+    125: {"name": "superior_vena_cava", "category": "cardiovascular"},
+    126: {"name": "thyroid_gland", "category": "endocrine"},
+    127: {"name": "vertebrae_S1", "category": "skeletal"},
+    128: {"name": "bone_lesion", "category": "oncology"},
+    129: {"name": "kidney_mass", "category": "oncology"},
+    130: {"name": "liver_tumor", "category": "oncology"},
+    131: {"name": "vertebrae_L6", "category": "skeletal"},
+    132: {"name": "airway", "category": "respiratory"},
 }
 
 # FastAPI imports
@@ -349,7 +427,6 @@ logger = logging.getLogger(__name__)
 class Vista3DRequest(BaseModel):
     imageId: str
     imageData: Dict  # Serialized VTK.js image data
-    confidenceThreshold: float = 0.5
     segmentEverything: bool = True
 
 class Vista3DResponse(BaseModel):
@@ -624,8 +701,8 @@ class Vista3DServer:
     
 
     
-    def _extract_detected_labels(self, segmentation: np.ndarray, confidence_threshold: float) -> List[Dict]:
-        """Extract detected anatomical structures from segmentation"""
+    def _extract_detected_labels(self, segmentation: np.ndarray) -> List[Dict]:
+        """Extract detected anatomical structures from segmentation - return ALL structures detected by VISTA3D"""
         detected_labels = []
         unique_labels = np.unique(segmentation)
         
@@ -635,30 +712,25 @@ class Vista3DServer:
             if label_id == 0:  # Skip background
                 continue
             
-            # Calculate volume (voxel count)
+            # Calculate volume (voxel count) for informational purposes only
             voxel_count = np.sum(segmentation == label_id)
             volume = float(voxel_count)
             
-            # Calculate confidence based on volume and structure type
-            # Larger, well-defined structures get higher confidence
-            # This would normally come from the VISTA3D model output
-            base_confidence = 0.75 + (min(voxel_count, 50000) / 100000) * 0.2
-            confidence = min(0.98, base_confidence)
+            # Get label information from VISTA3D mapping
+            label_info = VISTA3D_LABELS.get(int(label_id), {
+                "name": f"structure_{label_id}", 
+                "category": "unknown"
+            })
             
-            if confidence >= confidence_threshold and volume > 500:  # Minimum volume threshold
-                label_info = VISTA3D_LABELS.get(int(label_id), {
-                    "name": f"structure_{label_id}", 
-                    "category": "unknown"
-                })
-                
-                detected_labels.append({
-                    "id": int(label_id),
-                    "name": label_info["name"],
-                    "confidence": float(confidence),
-                    "volume": volume
-                })
+            # Return ALL structures detected by VISTA3D - no filtering!
+            # VISTA3D is the AI expert, we trust its segmentation decisions
+            detected_labels.append({
+                "id": int(label_id),
+                "name": label_info["name"],
+                "volume": volume
+            })
         
-        logger.info(f"Detected {len(detected_labels)} anatomical structures above threshold")
+        logger.info(f"Detected {len(detected_labels)} anatomical structures from VISTA3D")
         return detected_labels
     
     async def analyze_image(self, request: Vista3DRequest) -> Vista3DResponse:
@@ -727,14 +799,13 @@ class Vista3DServer:
             # Run actual VISTA3D inference
             segmentation, original_nifti_path = self._run_vista3d_inference(request)
             
-            # 🔧 FIX: Remap liver (label 1 → 101) to avoid VolView's default segment conflict
-            # Do this vectorized on server side for better performance
-            segmentation = segmentation.copy()
-            segmentation[segmentation == 1] = 101
-            logger.info("🔄 Remapped liver voxels from label 1 to 101 (avoiding VolView default segment)")
+            # ✅ NO REMAPPING NEEDED: Liver uses value=1 which matches VolView's default segment
+            # Since we configured VolView's default segment to be "liver" with value=1,
+            # VISTA3D's liver (label 1) will naturally populate the default segment
+            logger.info("✅ Using VISTA3D liver (label 1) as VolView's default segment")
             
             # Extract detected labels from segmentation
-            labels = self._extract_detected_labels(segmentation, request.confidenceThreshold)
+            labels = self._extract_detected_labels(segmentation)
             
             logger.info(f"VISTA3D analysis completed: {len(labels)} structures detected")
             return segmentation, labels, original_nifti_path
@@ -923,7 +994,6 @@ async def analyze_image(request: Vista3DRequest):
     """VISTA3D analysis endpoint"""
     logger.info(f"🔍 DEBUG: Received VISTA3D analysis request")
     logger.info(f"   - imageId: {request.imageId}")
-    logger.info(f"   - confidenceThreshold: {request.confidenceThreshold}")
     logger.info(f"   - segmentEverything: {request.segmentEverything}")
     logger.info(f"   - imageData type: {type(request.imageData)}")
     if isinstance(request.imageData, dict):
