@@ -204,7 +204,6 @@ async function callVista3dServer(imageId: string, params: Vista3dParams): Promis
     
     // Serialize the VTK image data for the server
     const serializedImageData = sourceImage.toJSON();
-    console.log('📦 Serialized image data:', serializedImageData);
     
     const response = await fetch('http://localhost:8081/api/vista3d_analysis', {
       method: 'POST',
@@ -223,7 +222,6 @@ async function callVista3dServer(imageId: string, params: Vista3dParams): Promis
     }
 
     const serverResult = await response.json();
-    console.log('✅ Server response received:', serverResult);
 
     // Convert server response to our format
     const result: Vista3dResult = {
@@ -232,10 +230,6 @@ async function callVista3dServer(imageId: string, params: Vista3dParams): Promis
       processingTime: serverResult.processingTime,
       labelmapData: serverResult.labelmapData
     };
-
-    console.log('✅ VISTA3D Analysis Complete!');
-    console.log('📊 Results:', result);
-    console.log('🎯 Segmented structures:', result.labels.length);
 
     return result;
 
@@ -299,16 +293,6 @@ async function createVista3dSegmentGroup(
           const container = (arr0?.data ?? arr0) as any;
           const valuesTA = container?.values;
           
-          // Debug: log decoded array info
-          console.log('🔍 Decoded array info:', {
-            dtype: container?.dataType,
-            ncomp: container?.numberOfComponents,
-            size: container?.size,
-            isUint8: valuesTA instanceof Uint8Array,
-            valuesLen: valuesTA?.length,
-            extent: labelmapInfo.extent
-          });
-          
           if (!(valuesTA instanceof Uint8Array)) {
             throw new Error(`Segment array must be Uint8Array, got ${valuesTA?.constructor?.name}`);
           }
@@ -335,16 +319,6 @@ async function createVista3dSegmentGroup(
         // Unify: prefer 'data' wrapper if present
         const container = (arr0?.data ?? arr0) as any;
         const valuesTA = container?.values;
-        
-        // Debug: log decoded array info
-        console.log('🔍 Decoded array info:', {
-          dtype: container?.dataType,
-          ncomp: container?.numberOfComponents,
-          size: container?.size,
-          isUint8: valuesTA instanceof Uint8Array,
-          valuesLen: valuesTA?.length,
-          extent: vtkjsObj.extent
-        });
         
         if (!(valuesTA instanceof Uint8Array)) {
           throw new Error(`Segment array must be Uint8Array, got ${valuesTA?.constructor?.name}`);
@@ -435,8 +409,6 @@ async function createVista3dSegmentGroup(
   // Add all segments detected by VISTA3D (no filtering!)
   const importantStructures = labels; // Include ALL detected structures
   
-  console.log(`🏷️ Adding ${importantStructures.length} segments:`);
-  
   // Note: Using actual VISTA3D label IDs as segment values
   
   // Note: Using actual VISTA3D label IDs as segment values (liver value=1 matches VolView's default segment)
@@ -455,8 +427,6 @@ async function createVista3dSegmentGroup(
         visible: true,
         locked: false,
       });
-      
-      console.log(`  ✅ ${label.name}: value=${segmentValue}, volume=${label.volume.toFixed(1)} voxels`);
     } catch (error) {
       console.warn(`  ⚠️ Failed to add segment ${label.name}:`, error);
     }
@@ -487,17 +457,7 @@ async function createVista3dSegmentGroup(
       const imageOrigin = parentImage.getOrigin();
       const segmentOrigin = segmentGroup.getOrigin();
       
-      console.log(`   📐 Image bounds: [${imageBounds.map((b: number) => b.toFixed(2)).join(', ')}]`);
-      console.log(`   📐 Segment bounds: [${segmentBounds.map((b: number) => b.toFixed(2)).join(', ')}]`);
-      console.log(`   📏 Image spacing: [${imageSpacing.map((s: number) => s.toFixed(3)).join(', ')}]`);
-      console.log(`   📏 Segment spacing: [${segmentSpacing.map((s: number) => s.toFixed(3)).join(', ')}]`);
-      console.log(`   📍 Image origin: [${imageOrigin.join(', ')}]`);
-      console.log(`   📍 Segment origin: [${segmentOrigin.join(', ')}]`);
-      
-      if (parentImage.getDirection && segmentGroup.getDirection) {
-        console.log(`   🧭 Image direction: ${parentImage.getDirection()}`);
-        console.log(`   🧭 Segment direction: ${segmentGroup.getDirection()}`);
-      }
+      // Skip verbose coordinate logging for performance
       
       // Check alignment
       const boundsMatch = imageBounds.every((val: number, i: number) => Math.abs(val - segmentBounds[i]) < 0.1);
@@ -508,27 +468,7 @@ async function createVista3dSegmentGroup(
       
       // Check actual voxel data for each created segment
       const scalars = segmentGroup.getPointData().getScalars();
-      if (scalars) {
-        console.log(`   🎯 Checking voxel data for ${importantStructures.length} segments:`);
-        importantStructures.forEach((label) => {
-          const segmentValue = label.id === 1 ? 101 : label.id;
-          let voxelCount = 0;
-          const totalVoxels = scalars.getNumberOfTuples();
-          
-          for (let i = 0; i < totalVoxels; i++) {
-            if (scalars.getTuple(i)[0] === segmentValue) {
-              voxelCount++;
-            }
-          }
-          
-          const percentage = (voxelCount / totalVoxels * 100).toFixed(2);
-          console.log(`     ${label.name} (value=${segmentValue}): ${voxelCount}/${totalVoxels} voxels (${percentage}%)`);
-          
-          if (voxelCount === 0) {
-            console.warn(`     ⚠️ WARNING: ${label.name} has NO voxel data in labelmap!`);
-          }
-        });
-      } else {
+      if (!scalars) {
         console.warn(`   ⚠️ NO SCALARS: Segment group missing voxel data entirely!`);
       }
       
