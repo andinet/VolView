@@ -24,20 +24,7 @@
           {{ isAnalyzing ? 'Running Analysis...' : 'START ANALYSIS' }}
         </v-btn>
         
-        <!-- Simple Confidence Slider -->
-        <div class="mb-3">
-          <div class="text-body-2 mb-2">
-            Confidence: {{ confidenceThreshold.toFixed(2) }}
-          </div>
-          <v-slider
-            v-model="confidenceThreshold"
-            :min="0.3"
-            :max="0.9"
-            :step="0.05"
-            color="primary"
-            label="Confidence Threshold"
-          />
-        </div>
+        <!-- Analysis will show ALL structures detected by VISTA3D AI model -->
       </v-card-text>
     </v-card>
   </div>
@@ -51,7 +38,6 @@ import { useVista3dStore } from '@/src/store/tools/vista3d';
 const vista3dStore = useVista3dStore();
 
 const {
-  confidenceThreshold,
   isAnalyzing,
 } = storeToRefs(vista3dStore);
 

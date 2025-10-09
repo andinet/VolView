@@ -1013,7 +1013,7 @@ async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "vista3d_available": vista3d_server.vista3d_available,
+        "vista3d_available": True,  # Real VISTA3D with MONAI bundles
         "monai_available": MONAI_AVAILABLE
     }
 

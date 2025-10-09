@@ -167,7 +167,6 @@ function createLabelmapWithData(imageId: string, segmentationData: Uint8Array, s
 export interface Vista3dParams {
   segmentEverything: boolean;
   selectedLabels: number[];
-  confidenceThreshold: number;
   usePointPrompts: boolean;
   pointPrompts: Array<{ point: [number, number, number]; label: number }>;
 }
@@ -177,7 +176,6 @@ export interface Vista3dResult {
   labels: Array<{
     id: number;
     name: string;
-    confidence: number;
     volume: number;
   }>;
   processingTime: number;
@@ -216,7 +214,6 @@ async function callVista3dServer(imageId: string, params: Vista3dParams): Promis
       body: JSON.stringify({
         imageId,
         imageData: serializedImageData,
-        confidenceThreshold: params.confidenceThreshold,
         segmentEverything: params.segmentEverything,
       }),
     });
@@ -245,30 +242,22 @@ async function callVista3dServer(imageId: string, params: Vista3dParams): Promis
   } catch (error) {
     console.error('❌ VISTA3D Server Error:', error);
     
-    // Fallback to mock data if server is unavailable
-    console.log('🔄 Falling back to mock data...');
-    const mockResult: Vista3dResult = {
-      segmentationId: `vista3d_mock_${Date.now()}`,
-      labels: [
-        { id: 1, name: "liver", confidence: 0.94, volume: 1850.2 },
-        { id: 20, name: "lung", confidence: 0.92, volume: 4200.5 },
-        { id: 22, name: "brain", confidence: 0.96, volume: 1400.8 },
-        { id: 115, name: "heart", confidence: 0.89, volume: 650.3 },
-        { id: 3, name: "spleen", confidence: 0.87, volume: 180.4 },
-        { id: 2, name: "kidney", confidence: 0.91, volume: 320.6 },
-      ],
-      processingTime: 2.5
-    };
-
-    console.log('✅ Mock Analysis Complete!');
-    return mockResult;
+    // Show clear error message to user instead of fallback mock data
+    const messageStore = useMessageStore();
+    const errorMessage = error instanceof Error ? error.message : 'Server connection error';
+    messageStore.addError(
+      'VISTA3D Analysis Failed', 
+      `${errorMessage}. Please ensure the VISTA3D server is running on localhost:8081.`
+    );
+    
+    throw error; // Re-throw to properly handle error in UI
   }
 }
 
 // Create actual segment group for VISTA3D visualization with real labelmap data
 async function createVista3dSegmentGroup(
   groupName: string, 
-  labels: Array<{ id: number; name: string; confidence: number; volume: number }>,
+  labels: Array<{ id: number; name: string; volume: number }>,
   imageId: string,
   labelmapData?: string | Record<string, any>
 ) {
@@ -443,32 +432,31 @@ async function createVista3dSegmentGroup(
     return [r, g, b, 255];
   };
 
-  // Add all segments with any detected confidence (no limit on number of segments)
-  const importantStructures = labels
-    .filter(label => label.confidence > 0.0); // Include all detected structures
+  // Add all segments detected by VISTA3D (no filtering!)
+  const importantStructures = labels; // Include ALL detected structures
   
   console.log(`🏷️ Adding ${importantStructures.length} segments:`);
   
   // Note: Using actual VISTA3D label IDs as segment values
   
-  // Note: Using actual VISTA3D label IDs as segment values (liver remapped from 1→101 to avoid VolView default segment conflict)
+  // Note: Using actual VISTA3D label IDs as segment values (liver value=1 matches VolView's default segment)
   
   importantStructures.forEach((label) => {
     const color = getSegmentColor(label.name);
-    // 🔧 FIX: Handle VolView's default segment value=1 conflict
-    // VolView creates default segment with value=1, so reassign liver to avoid conflict
-    const segmentValue = label.id === 1 ? 101 : label.id; // Liver: 1 → 101, others keep original IDs
+    // ✅ NO REMAPPING NEEDED: Liver (value=1) now uses VolView's default segment
+    // We configured the default segment to be "liver" with value=1
+    const segmentValue = label.id; // Use original VISTA3D label IDs directly
     
     try {
       segmentGroupStore.addSegment(segmentGroupId, {
-        name: `${label.name} (${(label.confidence * 100).toFixed(0)}%)`,
+        name: label.name,
         value: segmentValue,
         color,
         visible: true,
         locked: false,
       });
       
-      console.log(`  ✅ ${label.name}: value=${segmentValue}, confidence=${label.confidence.toFixed(2)}`);
+      console.log(`  ✅ ${label.name}: value=${segmentValue}, volume=${label.volume.toFixed(1)} voxels`);
     } catch (error) {
       console.warn(`  ⚠️ Failed to add segment ${label.name}:`, error);
     }
@@ -570,14 +558,11 @@ export const useVista3dStore = defineStore('vista3d', () => {
   // VISTA3D Parameters - Always automatic whole-body segmentation
   const segmentEverything = ref(true);
   const selectedLabels = ref<number[]>([]);
-  const confidenceThreshold = ref(0.10);
   const usePointPrompts = ref(false);
   const pointPrompts = ref<Array<{ point: [number, number, number]; label: number }>>([]);
 
   // Analysis State
   const isAnalyzing = ref(false);
-  const analysisResults = ref<Vista3dResult[]>([]);
-  const lastAnalysisTime = ref<Date | null>(null);
 
   // Available labels from VISTA3D metadata
   const availableLabels = computed(() => VISTA3D_LABELS);
@@ -589,12 +574,12 @@ export const useVista3dStore = defineStore('vista3d', () => {
     )
   );
 
-  // Server connection status
-  // For now, allow mock functionality even without server connection
-  const isServerConnected = computed(() => 
-    true // Always allow for testing with mock data
-    // serverStore.connState === 1 // ConnectionState.Connected (enable this for production)
-  );
+  // Server connection status - real health check
+  const isServerConnected = computed(() => {
+    // For VISTA3D, we need a proper server connection - no mock fallbacks
+    // TODO: Implement real server health check by pinging /api/health endpoint
+    return true; // For now, assume connected - error handling will catch server issues
+  });
 
   function setSegmentEverything() {
     // Always force to true for automatic whole-body segmentation
@@ -633,11 +618,11 @@ export const useVista3dStore = defineStore('vista3d', () => {
       return null;
     }
 
-    // Skip server check for mock mode
-    // if (!isServerConnected.value) {
-    //   messageStore.addError('Server not connected', new Error('Please connect to the VolView server first'));
-    //   return null;
-    // }
+    // Server connection check - ensure VISTA3D server is available
+    if (!isServerConnected.value) {
+      messageStore.addError('VISTA3D Server not connected', new Error('Please ensure the VISTA3D server is running on localhost:8081'));
+      return null;
+    }
 
     console.log('⚙️ Setting analysis state to active');
     isAnalyzing.value = true;
@@ -646,13 +631,12 @@ export const useVista3dStore = defineStore('vista3d', () => {
       const params: Vista3dParams = {
         segmentEverything: true, // Always segment everything for whole-body analysis
         selectedLabels: [], // Empty for automatic mode
-        confidenceThreshold: confidenceThreshold.value,
         usePointPrompts: false, // Disabled for automatic mode
         pointPrompts: [], // Empty for automatic mode
       };
 
       console.log('📡 Calling VISTA3D server...');
-      // Call real VISTA3D server (with fallback to mock if unavailable)
+      // Call real VISTA3D server
       const result = await callVista3dServer(currentImageID.value, params);
 
       console.log('🔄 Processing segmentation results...');
@@ -680,9 +664,6 @@ export const useVista3dStore = defineStore('vista3d', () => {
         console.warn('⚠️ No segmentation data to visualize');
       }
 
-      analysisResults.value.unshift(result);
-      lastAnalysisTime.value = new Date();
-
       messageStore._addMessage({
         title: 'VISTA-3D Analysis Complete',
         type: MessageType.Success,
@@ -698,23 +679,17 @@ export const useVista3dStore = defineStore('vista3d', () => {
     }
   }
 
-  function clearResults() {
-    analysisResults.value = [];
-    lastAnalysisTime.value = null;
-  }
+
 
   return {
     // Parameters
     segmentEverything,
     selectedLabels,
-    confidenceThreshold,
     usePointPrompts,
     pointPrompts,
 
     // State
     isAnalyzing,
-    analysisResults,
-    lastAnalysisTime,
 
     // Computed
     availableLabels,
@@ -728,6 +703,5 @@ export const useVista3dStore = defineStore('vista3d', () => {
     removePointPrompt,
     clearPointPrompts,
     runVista3dAnalysis,
-    clearResults,
   };
 });

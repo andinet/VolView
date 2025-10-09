@@ -302,8 +302,8 @@ export const ALLOW_MAXIMIZE_TOOLS = [
 export const DEFAULT_SEGMENT_MASKS: SegmentMask[] = [
   {
     value: 1,
-    name: 'Segment 1',
-    color: [255, 255, 0, 255],
+    name: 'liver',
+    color: [139, 69, 19, 255], // Brown color for liver
     visible: true,
   },
 ];

@@ -95,7 +95,7 @@ const testVista3d = async () => {
     const result = await client.call('vista3d_analysis', [id, {
       segmentEverything: true,
       selectedLabels: [],
-      confidenceThreshold: 0.5,
+
       usePointPrompts: false,
       pointPrompts: [],
     }]);
